@@ -57,9 +57,13 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
 
   joints_.resize(info_.joints.size(), Joint());
   joint_ids_.resize(info_.joints.size(), 0);
+  mechanical_reductions_.resize(info_.joints.size(), 1.0);
 
   for (uint i = 0; i < info_.joints.size(); i++) {
     joint_ids_[i] = std::stoi(info_.joints[i].parameters.at("id"));
+    if (info_.joints[i].parameters.count("mechanical_reduction") > 0) {
+      mechanical_reductions_[i] = std::stof(info_.joints[i].parameters.at("mechanical_reduction"));
+    }
     joints_[i].state.position = std::numeric_limits<double>::quiet_NaN();
     joints_[i].state.velocity = std::numeric_limits<double>::quiet_NaN();
     joints_[i].state.effort = std::numeric_limits<double>::quiet_NaN();
@@ -287,9 +291,9 @@ return_type DynamixelHardware::read(
   }
 
   for (uint i = 0; i < ids.size(); i++) {
-    joints_[i].state.position = dynamixel_workbench_.convertValue2Radian(ids[i], positions[i]);
-    joints_[i].state.velocity = dynamixel_workbench_.convertValue2Velocity(ids[i], velocities[i]);
-    joints_[i].state.effort = dynamixel_workbench_.convertValue2Current(currents[i]);
+    joints_[i].state.position = dynamixel_workbench_.convertValue2Radian(ids[i], positions[i]) / mechanical_reductions_[i];
+    joints_[i].state.velocity = dynamixel_workbench_.convertValue2Velocity(ids[i], velocities[i]) / mechanical_reductions_[i];
+    joints_[i].state.effort = dynamixel_workbench_.convertValue2Current(currents[i]) / mechanical_reductions_[i];
   }
 
   return return_type::OK;
@@ -424,7 +428,7 @@ return_type DynamixelHardware::set_control_mode(const ControlMode & mode, const 
     }
 
     for (uint i = 0; i < joint_ids_.size(); ++i) {
-      if (!dynamixel_workbench_.setPositionControlMode(joint_ids_[i], &log)) {
+      if (!dynamixel_workbench_.setExtendedPositionControlMode(joint_ids_[i], &log)) {
         RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "%s", log);
         return return_type::ERROR;
       }
@@ -474,7 +478,7 @@ CallbackReturn DynamixelHardware::set_joint_positions()
   for (uint i = 0; i < ids.size(); i++) {
     joints_[i].prev_command.position = joints_[i].command.position;
     commands[i] = dynamixel_workbench_.convertRadian2Value(
-      ids[i], static_cast<float>(joints_[i].command.position));
+      ids[i], static_cast<float>(joints_[i].command.position) * mechanical_reductions_[i]);
   }
   if (!dynamixel_workbench_.syncWrite(
       kGoalPositionIndex, ids.data(), ids.size(), commands.data(), 1, &log))
@@ -494,7 +498,7 @@ CallbackReturn DynamixelHardware::set_joint_velocities()
   for (uint i = 0; i < ids.size(); i++) {
     joints_[i].prev_command.velocity = joints_[i].command.velocity;
     commands[i] = dynamixel_workbench_.convertVelocity2Value(
-      ids[i], static_cast<float>(joints_[i].command.velocity));
+      ids[i], static_cast<float>(joints_[i].command.velocity) * mechanical_reductions_[i]);
   }
   if (!dynamixel_workbench_.syncWrite(
       kGoalVelocityIndex, ids.data(), ids.size(), commands.data(), 1, &log))
