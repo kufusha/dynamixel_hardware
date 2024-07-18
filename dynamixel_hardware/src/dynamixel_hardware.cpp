@@ -104,7 +104,6 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
   enable_torque(false);
   set_control_mode(ControlMode::Position, true);
   set_joint_params();
-  enable_torque(true);
 
   const ControlItem * goal_position =
     dynamixel_workbench_.getItemInfo(joint_ids_[0], kGoalPositionItem);
@@ -215,7 +214,7 @@ std::vector<hardware_interface::CommandInterface> DynamixelHardware::export_comm
   return command_interfaces;
 }
 
-CallbackReturn DynamixelHardware::on_activate(const rclcpp_lifecycle::State & /* previous_state */)
+CallbackReturn DynamixelHardware::on_configure(const rclcpp_lifecycle::State & /* previous_state */)
 {
   RCLCPP_DEBUG(rclcpp::get_logger(kDynamixelHardware), "start");
   for (uint i = 0; i < joints_.size(); i++) {
@@ -228,6 +227,8 @@ CallbackReturn DynamixelHardware::on_activate(const rclcpp_lifecycle::State & /*
   read(rclcpp::Time{}, rclcpp::Duration(0, 0));
   reset_command();
   write(rclcpp::Time{}, rclcpp::Duration(0, 0));
+
+  enable_torque(true);
 
   return CallbackReturn::SUCCESS;
 }
