@@ -92,9 +92,9 @@ private:
 
   return_type reset_command();
 
-  CallbackReturn set_joint_positions();
-  CallbackReturn set_joint_velocities();
-  CallbackReturn set_joint_params();
+  hardware_interface::return_type set_joint_positions();
+  hardware_interface::return_type set_joint_velocities();
+  hardware_interface::return_type set_joint_params();
 
   DynamixelWorkbench dynamixel_workbench_;
   std::map<const char * const, const ControlItem *> control_items_;
