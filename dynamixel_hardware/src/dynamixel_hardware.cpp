@@ -89,7 +89,7 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
   return CallbackReturn::SUCCESS;
 }
 
-return_type DynamixelHardware::read(
+hardware_interface::return_type DynamixelHardware::read(
   const rclcpp::Time & /* time */,
   const rclcpp::Duration & /* period */)
 {
@@ -107,8 +107,8 @@ return_type DynamixelHardware::read(
     dynamixel_workbench_.itemRead(id, kPresentCurrentItem, &cur, &log);
 
     joints_[i].state.position = dynamixel_workbench_.convertValue2Radian(id, pos) / mechanical_reductions_[i];
-    joints_[i].state.position = dynamixel_workbench_.convertValue2Velocity(id, vel) / mechanical_reductions_[i];
-    joints_[i].state.position = dynamixel_workbench_.convertValue2Current(cur) / mechanical_reductions_[i];
+    joints_[i].state.velocity = dynamixel_workbench_.convertValue2Velocity(id, vel) / mechanical_reductions_[i];
+    joints_[i].state.effort = dynamixel_workbench_.convertValue2Current(cur) / mechanical_reductions_[i];
   }
   return return_type::OK;
 }
@@ -203,6 +203,13 @@ CallbackReturn DynamixelHardware::on_configure(const rclcpp_lifecycle::State &)
   reset_command();
   write(rclcpp::Time{}, rclcpp::Duration(0, 0));
   enable_torque(true);
+  return CallbackReturn::SUCCESS;
+}
+
+CallbackReturn DynamixelHardware::on_deactivate(
+  const rclcpp_lifecycle::State & /* previous_state */)
+{
+  RCLCPP_DEBUG(rclcpp::get_logger(kDynamixelHardware), "stop");
   return CallbackReturn::SUCCESS;
 }
 
