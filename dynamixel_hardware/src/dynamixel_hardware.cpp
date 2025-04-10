@@ -199,6 +199,17 @@ CallbackReturn DynamixelHardware::on_configure(const rclcpp_lifecycle::State &)
       j.state.position = j.state.velocity = j.state.effort = 0.0;
     }
   }
+  
+  // 第1,2,3関節を0度に初期化（電源投入後の状態を無視して強制的に0度と仮定）
+  // インデックスは0から始まるので注意
+  if (!use_dummy_) {
+    for (uint i = 0; i < 3 && i < joints_.size(); ++i) {
+      joints_[i].state.position = 0.0;  // 0度と仮定
+      RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), 
+                  "Initialized joint %d position to 0.0 radians", i);
+    }
+  }
+  
   read(rclcpp::Time{}, rclcpp::Duration(0, 0));
   reset_command();
   write(rclcpp::Time{}, rclcpp::Duration(0, 0));
@@ -243,6 +254,69 @@ std::vector<hardware_interface::CommandInterface> DynamixelHardware::export_comm
     command_interfaces.emplace_back(info_.joints[i].name, hardware_interface::HW_IF_VELOCITY, &joints_[i].command.velocity);
   }
   return command_interfaces;
+}
+
+return_type DynamixelHardware::set_control_mode(const ControlMode & mode, const bool force_set)
+{
+  const char * log = nullptr;
+  mode_changed_ = false;
+
+  if (mode == ControlMode::Velocity && (force_set || control_mode_ != ControlMode::Velocity)) {
+    bool torque_enabled = torque_enabled_;
+    if (torque_enabled) {
+      enable_torque(false);
+    }
+
+    for (uint i = 0; i < joint_ids_.size(); ++i) {
+      if (!dynamixel_workbench_.setVelocityControlMode(joint_ids_[i], &log)) {
+        RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "%s", log);
+        return return_type::ERROR;
+      }
+    }
+    RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), "Velocity control");
+    if (control_mode_ != ControlMode::Velocity) {
+      mode_changed_ = true;
+      control_mode_ = ControlMode::Velocity;
+    }
+
+    if (torque_enabled) {
+      enable_torque(true);
+    }
+    return return_type::OK;
+  }
+
+  if (mode == ControlMode::Position && (force_set || control_mode_ != ControlMode::Position)) {
+    bool torque_enabled = torque_enabled_;
+    if (torque_enabled) {
+      enable_torque(false);
+    }
+
+    for (uint i = 0; i < joint_ids_.size(); ++i) {
+      if (!dynamixel_workbench_.setExtendedPositionControlMode(joint_ids_[i], &log)) {
+        RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "%s", log);
+        return return_type::ERROR;
+      }
+    }
+    RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), "Position control");
+    if (control_mode_ != ControlMode::Position) {
+      mode_changed_ = true;
+      control_mode_ = ControlMode::Position;
+    }
+
+    if (torque_enabled) {
+      enable_torque(true);
+    }
+    return return_type::OK;
+  }
+
+  // その他のモードについてのチェック
+  if (control_mode_ != ControlMode::Velocity && control_mode_ != ControlMode::Position) {
+    RCLCPP_FATAL(
+      rclcpp::get_logger(kDynamixelHardware), "Only position/velocity control are implemented");
+    return return_type::ERROR;
+  }
+
+  return return_type::OK;
 }
 
 }  // namespace dynamixel_hardware
