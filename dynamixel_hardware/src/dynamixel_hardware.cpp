@@ -98,6 +98,11 @@ hardware_interface::return_type DynamixelHardware::read(
   }
   const char * log = nullptr;
 
+  // 最初の読み取り時に使うオフセット値を保存する変数
+  static std::vector<double> joint_offsets(joint_ids_.size(), 0.0);
+  // オフセットが初期化されたかのフラグ
+  static bool offsets_initialized = false;
+
   for (uint i = 0; i < joint_ids_.size(); ++i){
     int32_t pos = 0, vel = 0, cur = 0;
     uint8_t id = joint_ids_[i];
@@ -106,7 +111,27 @@ hardware_interface::return_type DynamixelHardware::read(
     dynamixel_workbench_.itemRead(id, kPresentVelocityItem, &vel, &log);
     dynamixel_workbench_.itemRead(id, kPresentCurrentItem, &cur, &log);
 
-    joints_[i].state.position = dynamixel_workbench_.convertValue2Radian(id, pos) / mechanical_reductions_[i];
+    double raw_position = dynamixel_workbench_.convertValue2Radian(id, pos) / mechanical_reductions_[i];
+    
+    if (!offsets_initialized) {
+      if(i < 3){ // TODO:(Taiga SASAKI) マジックナンバーの削除
+        joint_offsets[i] = raw_position;
+        RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), 
+                    "Set joint %d offset to %.4f", i, joint_offsets[i]);
+      }
+      // すべてのジョイントを処理した後でフラグを設定
+      if (i == joint_ids_.size() - 1) {
+        offsets_initialized = true;
+      }
+    }
+    
+    // オフセットを適用（ID:1～3のみ）
+    if (i < 3) {
+      joints_[i].state.position = raw_position - joint_offsets[i];
+    } else {
+      joints_[i].state.position = raw_position;
+    }
+    
     joints_[i].state.velocity = dynamixel_workbench_.convertValue2Velocity(id, vel) / mechanical_reductions_[i];
     joints_[i].state.effort = dynamixel_workbench_.convertValue2Current(cur) / mechanical_reductions_[i];
   }
