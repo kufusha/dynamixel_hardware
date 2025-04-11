@@ -105,6 +105,8 @@ private:
   ControlMode control_mode_{ControlMode::Position};
   bool mode_changed_{false};
   bool use_dummy_{false};
+  std::vector<double> joint_offsets_;
+  bool offsets_initialized_ = false;
 };
 }  // namespace dynamixel_hardware
 

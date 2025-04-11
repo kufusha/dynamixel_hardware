@@ -39,6 +39,8 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
   joints_.resize(info_.joints.size(), Joint());
   joint_ids_.resize(info_.joints.size(), 0);
   mechanical_reductions_.resize(info_.joints.size(), 1.0);
+  joint_offsets_.resize(info_.joints.size(), 0.0);
+  offsets_initialized_ = false;
 
   for (uint i = 0; i < info_.joints.size(); i++) {
     joint_ids_[i] = std::stoi(info_.joints[i].parameters.at("id"));
@@ -98,11 +100,6 @@ hardware_interface::return_type DynamixelHardware::read(
   }
   const char * log = nullptr;
 
-  // 最初の読み取り時に使うオフセット値を保存する変数
-  static std::vector<double> joint_offsets(joint_ids_.size(), 0.0);
-  // オフセットが初期化されたかのフラグ
-  static bool offsets_initialized = false;
-
   for (uint i = 0; i < joint_ids_.size(); ++i){
     int32_t pos = 0, vel = 0, cur = 0;
     uint8_t id = joint_ids_[i];
@@ -113,21 +110,9 @@ hardware_interface::return_type DynamixelHardware::read(
 
     double raw_position = dynamixel_workbench_.convertValue2Radian(id, pos) / mechanical_reductions_[i];
     
-    if (!offsets_initialized) {
-      if(i < 3){ // TODO:(Taiga SASAKI) マジックナンバーの削除
-        joint_offsets[i] = raw_position;
-        RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), 
-                    "Set joint %d offset to %.4f", i, joint_offsets[i]);
-      }
-      // すべてのジョイントを処理した後でフラグを設定
-      if (i == joint_ids_.size() - 1) {
-        offsets_initialized = true;
-      }
-    }
     
-    // オフセットを適用（ID:1～3のみ）
-    if (i < 3) {
-      joints_[i].state.position = raw_position - joint_offsets[i];
+    if(i < 3 && offsets_initialized_){ // TODO:(Taiga SASAKI) マジックナンバーの削除
+      joints_[i].state.position = raw_position - joint_offsets_[i];
     } else {
       joints_[i].state.position = raw_position;
     }
@@ -228,14 +213,19 @@ CallbackReturn DynamixelHardware::on_configure(const rclcpp_lifecycle::State &)
   // 第1,2,3関節を0度に初期化（電源投入後の状態を無視して強制的に0度と仮定）
   // インデックスは0から始まるので注意
   if (!use_dummy_) {
+
+    read(rclcpp::Time{}, rclcpp::Duration(0, 0));
+
     for (uint i = 0; i < 3 && i < joints_.size(); ++i) {
+      joint_offsets_[i] = joints_[i].state.position;
       joints_[i].state.position = 0.0;  // 0度と仮定
       RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), 
-                  "Initialized joint %d position to 0.0 radians", i);
+                "Set joint %d offset to %.4f, position now at 0.0", 
+                i, joint_offsets_[i]); 
     }
+    offsets_initialized_ = true;
   }
   
-  read(rclcpp::Time{}, rclcpp::Duration(0, 0));
   reset_command();
   write(rclcpp::Time{}, rclcpp::Duration(0, 0));
   enable_torque(true);
