@@ -157,7 +157,15 @@ hardware_interface::return_type DynamixelHardware::set_joint_positions()
   const char * log = nullptr;
   for (uint i = 0; i < joint_ids_.size(); ++i) {
     joints_[i].prev_command.position = joints_[i].command.position;
-    int32_t raw = dynamixel_workbench_.convertRadian2Value(joint_ids_[i], joints_[i].command.position * mechanical_reductions_[i]);
+    double target_position = joints_[i].command.position;
+
+    if(i < 3 && offsets_initialized_)
+    {
+      target_position = target_position + joint_offsets_[i];
+    }
+
+    int32_t raw = dynamixel_workbench_.convertRadian2Value(
+      joint_ids_[i], target_position * mechanical_reductions_[i]);
     dynamixel_workbench_.itemWrite(joint_ids_[i], kGoalPositionItem, raw, &log);
   }
   return hardware_interface::return_type::OK;
