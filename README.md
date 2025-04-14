@@ -97,3 +97,85 @@ Then follow the same instruction of the real robot one.
 
 Note that the dummy implementation has no interpolation so far.
 If you sent a joint message, the robot would move directly to the joints without interpolation.
+
+## Advanced Features
+
+### Joint Offset Management
+
+This implementation includes a special feature for managing joint offsets, particularly useful for robot arms that need to initialize from arbitrary positions:
+
+```cpp
+// Example from dynamixel_hardware.cpp
+if(i < 3 && offsets_initialized_) {
+  joints_[i].state.position = raw_position - joint_offsets_[i];
+} else {
+  joints_[i].state.position = raw_position;
+}
+```
+
+The first three joints (typically the base, shoulder, and elbow of a robot arm) automatically have their initial positions recorded as offsets during initialization, treating them as the "zero" position. This feature helps:
+
+- Initialize the robot from any physical position
+- Maintain consistent coordinate frames regardless of power-cycle position
+- Simplify trajectory planning by establishing a reliable zero position
+
+### Control Mode Switching
+
+The hardware interface supports automatic switching between position and velocity control modes:
+
+```cpp
+// Automatically switches based on command type
+if (std::any_of(joints_.cbegin(), joints_.cend(), [](auto j) { return j.command.velocity != j.prev_command.velocity; })) {
+  set_control_mode(ControlMode::Velocity);
+  if (mode_changed_) set_joint_params();
+  return set_joint_velocities();
+}
+
+if (std::any_of(joints_.cbegin(), joints_.cend(), [](auto j) { return j.command.position != j.prev_command.position; })) {
+  set_control_mode(ControlMode::Position);
+  if (mode_changed_) set_joint_params();
+  return set_joint_positions();
+}
+```
+
+This allows you to:
+- Use the same hardware interface for both position and velocity control
+- Seamlessly transition between control strategies
+- Support multiple ROS 2 controller types with the same hardware
+
+### Mechanical Reduction Support
+
+For robots with gearing or other mechanical reductions, you can specify reduction ratios per joint:
+
+```xml
+<joint name="joint1">
+  <param name="id">11</param>
+  <param name="mechanical_reduction">1.0</param>
+</joint>
+```
+
+The interface handles the conversion between motor angles and actual joint angles based on these ratios.
+
+### Extended Joint Parameters
+
+Each joint can be configured with additional performance parameters:
+
+```cpp
+constexpr const char * const kExtraJointParameters[] = {
+  "Profile_Velocity", "Profile_Acceleration", "Position_P_Gain",
+  "Position_I_Gain", "Position_D_Gain", "Velocity_P_Gain", "Velocity_I_Gain"
+};
+```
+
+Example configuration in URDF:
+
+```xml
+<joint name="joint1">
+  <param name="id">11</param>
+  <param name="mechanical_reduction">1.0</param>
+  <param name="Profile_Velocity">100</param>
+  <param name="Position_P_Gain">800</param>
+</joint>
+```
+
+This allows fine-tuning of joint control parameters without modifying the code.
