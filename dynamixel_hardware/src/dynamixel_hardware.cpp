@@ -29,15 +29,14 @@ namespace dynamixel_hardware
 constexpr const char * kDynamixelHardware = "DynamixelHardware";
 constexpr uint8_t kGoalPositionIndex = 0;
 constexpr uint8_t kGoalVelocityIndex = 1;
-constexpr uint8_t kPresentPositionVelocityCurrentIndex = 0;
+constexpr uint8_t kPresentPositionCurrentIndex = 0;
+constexpr uint8_t kExternalPortIndex = 1;
 constexpr const char * kGoalPositionItem = "Goal_Position";
 constexpr const char * kGoalVelocityItem = "Goal_Velocity";
-constexpr const char * kMovingSpeedItem = "Moving_Speed";
 constexpr const char * kPresentPositionItem = "Present_Position";
-constexpr const char * kPresentVelocityItem = "Present_Velocity";
-constexpr const char * kPresentSpeedItem = "Present_Speed";
 constexpr const char * kPresentCurrentItem = "Present_Current";
 constexpr const char * kPresentLoadItem = "Present_Load";
+constexpr const char * kExternalPortItem = "External_Port_Data_1";
 constexpr const char * const kExtraJointParameters[] = {
   "Profile_Velocity",
   "Profile_Acceleration",
@@ -55,25 +54,76 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
     return CallbackReturn::ERROR;
   }
 
+  // Initialize ROS2 node for services
+  // if (!rclcpp::ok()) {
+  //   rclcpp::init(0, nullptr);
+  // }
+  // node_ = rclcpp::Node::make_shared("dynamixel_hardware_services");
+  // 
+  // // Create torque enable service
+  // torque_service_ = node_->create_service<std_srvs::srv::SetBool>(
+  //   "torque_enable",
+  //   std::bind(&DynamixelHardware::torque_enable_service_callback, this,
+  //             std::placeholders::_1, std::placeholders::_2));
+
   joints_.resize(info_.joints.size(), Joint());
   joint_ids_.resize(info_.joints.size(), 0);
   mechanical_reductions_.resize(info_.joints.size(), 1.0);
+  external_types_.resize(info_.joints.size(), "none");
+  calibration_data_.resize(info_.joints.size(), CalibrationData());
 
   for (uint i = 0; i < info_.joints.size(); i++) {
     joint_ids_[i] = std::stoi(info_.joints[i].parameters.at("id"));
     if (info_.joints[i].parameters.count("mechanical_reduction") > 0) {
       mechanical_reductions_[i] = std::stof(info_.joints[i].parameters.at("mechanical_reduction"));
     }
+    if (info_.joints[i].parameters.count("external_type") > 0) {
+      external_types_[i] = info_.joints[i].parameters.at("external_type");
+      calibration_data_[i].external_type = external_types_[i];
+      
+      // Load calibration parameters for potentiometer
+      if (external_types_[i] == "potential") {
+        if (info_.joints[i].parameters.count("angle_min") > 0) {
+          calibration_data_[i].angle_min = std::stof(info_.joints[i].parameters.at("angle_min"));
+        }
+        if (info_.joints[i].parameters.count("adc_min") > 0) {
+          calibration_data_[i].adc_min = std::stof(info_.joints[i].parameters.at("adc_min"));
+        }
+        if (info_.joints[i].parameters.count("angle_max") > 0) {
+          calibration_data_[i].angle_max = std::stof(info_.joints[i].parameters.at("angle_max"));
+        }
+        if (info_.joints[i].parameters.count("adc_max") > 0) {
+          calibration_data_[i].adc_max = std::stof(info_.joints[i].parameters.at("adc_max"));
+        }
+      }
+      
+      // Load calibration parameters for dual limit
+      if (external_types_[i] == "dual_limit") {
+        if (info_.joints[i].parameters.count("high_limit") > 0) {
+          calibration_data_[i].high_limit = std::stof(info_.joints[i].parameters.at("high_limit"));
+        }
+        if (info_.joints[i].parameters.count("low_limit") > 0) {
+          calibration_data_[i].low_limit = std::stof(info_.joints[i].parameters.at("low_limit"));
+        }
+        if (info_.joints[i].parameters.count("external_io_high") > 0) {
+          calibration_data_[i].external_io_high = std::stoi(info_.joints[i].parameters.at("external_io_high"));
+        }
+        if (info_.joints[i].parameters.count("external_io_low") > 0) {
+          calibration_data_[i].external_io_low = std::stoi(info_.joints[i].parameters.at("external_io_low"));
+        }
+        if (info_.joints[i].parameters.count("safety_margin") > 0) {
+          calibration_data_[i].safety_margin = std::stof(info_.joints[i].parameters.at("safety_margin"));
+        }
+      }
+    }
     joints_[i].state.position = std::numeric_limits<double>::quiet_NaN();
-    joints_[i].state.velocity = std::numeric_limits<double>::quiet_NaN();
     joints_[i].state.effort = std::numeric_limits<double>::quiet_NaN();
     joints_[i].command.position = std::numeric_limits<double>::quiet_NaN();
-    joints_[i].command.velocity = std::numeric_limits<double>::quiet_NaN();
     joints_[i].command.effort = std::numeric_limits<double>::quiet_NaN();
     joints_[i].prev_command.position = joints_[i].command.position;
-    joints_[i].prev_command.velocity = joints_[i].command.velocity;
     joints_[i].prev_command.effort = joints_[i].command.effort;
-    RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), "joint_id %d: %d", i, joint_ids_[i]);
+    RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), "joint_id %d: %d, external_type: %s", 
+                i, joint_ids_[i], external_types_[i].c_str());
   }
 
   if (
@@ -83,6 +133,14 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
     use_dummy_ = true;
     RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), "dummy mode");
     return CallbackReturn::SUCCESS;
+  }
+
+  if (
+    info_.hardware_parameters.find("is_external_pos") != info_.hardware_parameters.end() &&
+    info_.hardware_parameters.at("is_external_pos") == "true")
+  {
+    is_external_pos_ = true;
+    RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), "external position mode enabled");
   }
 
   auto usb_port = info_.hardware_parameters.at("usb_port");
@@ -115,14 +173,6 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
     return CallbackReturn::ERROR;
   }
 
-  const ControlItem * goal_velocity =
-    dynamixel_workbench_.getItemInfo(joint_ids_[0], kGoalVelocityItem);
-  if (goal_velocity == nullptr) {
-    goal_velocity = dynamixel_workbench_.getItemInfo(joint_ids_[0], kMovingSpeedItem);
-  }
-  if (goal_velocity == nullptr) {
-    return CallbackReturn::ERROR;
-  }
 
   const ControlItem * present_position =
     dynamixel_workbench_.getItemInfo(joint_ids_[0], kPresentPositionItem);
@@ -130,14 +180,6 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
     return CallbackReturn::ERROR;
   }
 
-  const ControlItem * present_velocity =
-    dynamixel_workbench_.getItemInfo(joint_ids_[0], kPresentVelocityItem);
-  if (present_velocity == nullptr) {
-    present_velocity = dynamixel_workbench_.getItemInfo(joint_ids_[0], kPresentSpeedItem);
-  }
-  if (present_velocity == nullptr) {
-    return CallbackReturn::ERROR;
-  }
 
   const ControlItem * present_current =
     dynamixel_workbench_.getItemInfo(joint_ids_[0], kPresentCurrentItem);
@@ -149,10 +191,18 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
   }
 
   control_items_[kGoalPositionItem] = goal_position;
-  control_items_[kGoalVelocityItem] = goal_velocity;
   control_items_[kPresentPositionItem] = present_position;
-  control_items_[kPresentVelocityItem] = present_velocity;
   control_items_[kPresentCurrentItem] = present_current;
+
+  if (is_external_pos_) {
+    const ControlItem * external_port =
+      dynamixel_workbench_.getItemInfo(joint_ids_[0], kExternalPortItem);
+    if (external_port == nullptr) {
+      RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "External_Port_Data_1 not found");
+      return CallbackReturn::ERROR;
+    }
+    control_items_[kExternalPortItem] = external_port;
+  }
 
   if (!dynamixel_workbench_.addSyncWriteHandler(
       control_items_[kGoalPositionItem]->address, control_items_[kGoalPositionItem]->data_length,
@@ -162,22 +212,22 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
     return CallbackReturn::ERROR;
   }
 
-  if (!dynamixel_workbench_.addSyncWriteHandler(
-      control_items_[kGoalVelocityItem]->address, control_items_[kGoalVelocityItem]->data_length,
-      &log))
-  {
-    RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "%s", log);
-    return CallbackReturn::ERROR;
-  }
 
   uint16_t start_address = std::min(
     control_items_[kPresentPositionItem]->address, control_items_[kPresentCurrentItem]->address);
   uint16_t read_length = control_items_[kPresentPositionItem]->data_length +
-    control_items_[kPresentVelocityItem]->data_length +
     control_items_[kPresentCurrentItem]->data_length + 2;
   if (!dynamixel_workbench_.addSyncReadHandler(start_address, read_length, &log)) {
     RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "%s", log);
     return CallbackReturn::ERROR;
+  }
+
+  if (is_external_pos_) {
+    if (!dynamixel_workbench_.addSyncReadHandler(
+        control_items_[kExternalPortItem]->address, control_items_[kExternalPortItem]->data_length, &log)) {
+      RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "%s", log);
+      return CallbackReturn::ERROR;
+    }
   }
 
   return CallbackReturn::SUCCESS;
@@ -224,11 +274,14 @@ CallbackReturn DynamixelHardware::on_configure(const rclcpp_lifecycle::State & /
   for (uint i = 0; i < joints_.size(); i++) {
     if (use_dummy_ && std::isnan(joints_[i].state.position)) {
       joints_[i].state.position = 0.0;
-      joints_[i].state.velocity = 0.0;
       joints_[i].state.effort = 0.0;
     }
   }
   read(rclcpp::Time{}, rclcpp::Duration(0, 0));
+  
+  // Restore multiturn position from potential sensors
+  restore_multiturn_from_potential();
+  
   reset_command();
   write(rclcpp::Time{}, rclcpp::Duration(0, 0));
 
@@ -254,20 +307,20 @@ return_type DynamixelHardware::read(
 
   std::vector<uint8_t> ids(info_.joints.size(), 0);
   std::vector<int32_t> positions(info_.joints.size(), 0);
-  std::vector<int32_t> velocities(info_.joints.size(), 0);
   std::vector<int32_t> currents(info_.joints.size(), 0);
+  std::vector<int32_t> external_positions(info_.joints.size(), 0);
 
   std::copy(joint_ids_.begin(), joint_ids_.end(), ids.begin());
   const char * log = nullptr;
 
   if (!dynamixel_workbench_.syncRead(
-      kPresentPositionVelocityCurrentIndex, ids.data(), ids.size(), &log))
+      kPresentPositionCurrentIndex, ids.data(), ids.size(), &log))
   {
     RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "%s", log);
   }
 
   if (!dynamixel_workbench_.getSyncReadData(
-      kPresentPositionVelocityCurrentIndex, ids.data(), ids.size(),
+      kPresentPositionCurrentIndex, ids.data(), ids.size(),
       control_items_[kPresentCurrentItem]->address,
       control_items_[kPresentCurrentItem]->data_length, currents.data(), &log))
   {
@@ -275,24 +328,40 @@ return_type DynamixelHardware::read(
   }
 
   if (!dynamixel_workbench_.getSyncReadData(
-      kPresentPositionVelocityCurrentIndex, ids.data(), ids.size(),
-      control_items_[kPresentVelocityItem]->address,
-      control_items_[kPresentVelocityItem]->data_length, velocities.data(), &log))
-  {
-    RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "%s", log);
-  }
-
-  if (!dynamixel_workbench_.getSyncReadData(
-      kPresentPositionVelocityCurrentIndex, ids.data(), ids.size(),
+      kPresentPositionCurrentIndex, ids.data(), ids.size(),
       control_items_[kPresentPositionItem]->address,
       control_items_[kPresentPositionItem]->data_length, positions.data(), &log))
   {
     RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "%s", log);
   }
 
+  if (is_external_pos_) {
+    if (!dynamixel_workbench_.syncRead(
+        kExternalPortIndex, ids.data(), ids.size(), &log))
+    {
+      RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "%s", log);
+    }
+
+    if (!dynamixel_workbench_.getSyncReadData(
+        kExternalPortIndex, ids.data(), ids.size(),
+        control_items_[kExternalPortItem]->address,
+        control_items_[kExternalPortItem]->data_length, external_positions.data(), &log))
+    {
+      RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "%s", log);
+    }
+  }
+
   for (uint i = 0; i < ids.size(); i++) {
-    joints_[i].state.position = dynamixel_workbench_.convertValue2Radian(ids[i], positions[i]) / mechanical_reductions_[i];
-    joints_[i].state.velocity = dynamixel_workbench_.convertValue2Velocity(ids[i], velocities[i]) / mechanical_reductions_[i];
+    // Use external sensor for position only if multiturn restoration hasn't been completed
+    if (!multiturn_restored_ && external_types_[i] == "potential") {
+      // Use external potentiometer reading with calibration (only during startup)
+      joints_[i].state.position = convert_external_sensor_to_angle(i, external_positions[i]);
+    } else if (is_external_pos_ && external_types_[i] == "none") {
+      joints_[i].state.position = static_cast<double>(external_positions[i]) / mechanical_reductions_[i];
+    } else {
+      // Use internal Dynamixel position reading (normal operation)
+      joints_[i].state.position = dynamixel_workbench_.convertValue2Radian(ids[i], positions[i]) / mechanical_reductions_[i];
+    }
     joints_[i].state.effort = dynamixel_workbench_.convertValue2Current(currents[i]) / mechanical_reductions_[i];
   }
 
@@ -311,58 +380,30 @@ return_type DynamixelHardware::write(
     return return_type::OK;
   }
 
-  // Velocity control
-  if (std::any_of(
-      joints_.cbegin(), joints_.cend(), [](auto j) {
-        return j.command.velocity != j.prev_command.velocity;
-      }))
-  {
-    set_control_mode(ControlMode::Velocity);
-    if (mode_changed_) {
-      set_joint_params();
+  // ID:7のリミットチェック
+  if (joints_.size() > 6) {  // arm_joint_7が存在する場合
+    if (!check_proximity_limit(6, joints_[6].command.position)) {
+      // リミット検出時は現在位置を維持
+      joints_[6].command.position = joints_[6].state.position;
+      joints_[6].command.velocity = 0.0;
     }
+  }
+
+  // Check if velocity commands are set (non-zero)
+  bool has_velocity_commands = false;
+  for (const auto& joint : joints_) {
+    if (std::abs(joint.command.velocity) > 1e-6) {
+      has_velocity_commands = true;
+      break;
+    }
+  }
+
+  if (has_velocity_commands) {
     set_joint_velocities();
-    return return_type::OK;
-  }
-
-  // Position control
-  if (std::any_of(
-      joints_.cbegin(), joints_.cend(), [](auto j) {
-        return j.command.position != j.prev_command.position;
-      }))
-  {
-    set_control_mode(ControlMode::Position);
-    if (mode_changed_) {
-      set_joint_params();
-    }
+  } else {
     set_joint_positions();
-    return return_type::OK;
   }
-
-  // Effort control
-  if (std::any_of(
-      joints_.cbegin(), joints_.cend(), [](auto j) {return j.command.effort != 0.0;}))
-  {
-    RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "Effort control is not implemented");
-    return return_type::ERROR;
-  }
-
-  // If all command values are unchanged, then remain in existing control mode and set
-  // corresponding command values
-  switch (control_mode_) {
-    case ControlMode::Velocity:
-      set_joint_velocities();
-      return return_type::OK;
-      break;
-    case ControlMode::Position:
-      set_joint_positions();
-      return return_type::OK;
-      break;
-    default:  // effort, etc
-      RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "Control mode not implemented");
-      return return_type::ERROR;
-      break;
-  }
+  return return_type::OK;
 }
 
 return_type DynamixelHardware::enable_torque(const bool enabled)
@@ -397,29 +438,6 @@ return_type DynamixelHardware::set_control_mode(const ControlMode & mode, const 
   const char * log = nullptr;
   mode_changed_ = false;
 
-  if (mode == ControlMode::Velocity && (force_set || control_mode_ != ControlMode::Velocity)) {
-    bool torque_enabled = torque_enabled_;
-    if (torque_enabled) {
-      enable_torque(false);
-    }
-
-    for (uint i = 0; i < joint_ids_.size(); ++i) {
-      if (!dynamixel_workbench_.setVelocityControlMode(joint_ids_[i], &log)) {
-        RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "%s", log);
-        return return_type::ERROR;
-      }
-    }
-    RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), "Velocity control");
-    if (control_mode_ != ControlMode::Velocity) {
-      mode_changed_ = true;
-      control_mode_ = ControlMode::Velocity;
-    }
-
-    if (torque_enabled) {
-      enable_torque(true);
-    }
-    return return_type::OK;
-  }
 
   if (mode == ControlMode::Position && (force_set || control_mode_ != ControlMode::Position)) {
     bool torque_enabled = torque_enabled_;
@@ -428,7 +446,7 @@ return_type DynamixelHardware::set_control_mode(const ControlMode & mode, const 
     }
 
     for (uint i = 0; i < joint_ids_.size(); ++i) {
-      if (!dynamixel_workbench_.setExtendedPositionControlMode(joint_ids_[i], &log)) {
+      if (!dynamixel_workbench_.setPositionControlMode(joint_ids_[i], &log)) {
         RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "%s", log);
         return return_type::ERROR;
       }
@@ -445,9 +463,9 @@ return_type DynamixelHardware::set_control_mode(const ControlMode & mode, const 
     return return_type::OK;
   }
 
-  if (control_mode_ != ControlMode::Velocity && control_mode_ != ControlMode::Position) {
+  if (control_mode_ != ControlMode::Position) {
     RCLCPP_FATAL(
-      rclcpp::get_logger(kDynamixelHardware), "Only position/velocity control are implemented");
+      rclcpp::get_logger(kDynamixelHardware), "Only position control is implemented");
     return return_type::ERROR;
   }
 
@@ -458,10 +476,8 @@ return_type DynamixelHardware::reset_command()
 {
   for (uint i = 0; i < joints_.size(); i++) {
     joints_[i].command.position = joints_[i].state.position;
-    joints_[i].command.velocity = 0.0;
     joints_[i].command.effort = 0.0;
     joints_[i].prev_command.position = joints_[i].command.position;
-    joints_[i].prev_command.velocity = joints_[i].command.velocity;
     joints_[i].prev_command.effort = joints_[i].command.effort;
   }
 
@@ -488,25 +504,6 @@ CallbackReturn DynamixelHardware::set_joint_positions()
   return CallbackReturn::SUCCESS;
 }
 
-CallbackReturn DynamixelHardware::set_joint_velocities()
-{
-  const char * log = nullptr;
-  std::vector<int32_t> commands(info_.joints.size(), 0);
-  std::vector<uint8_t> ids(info_.joints.size(), 0);
-
-  std::copy(joint_ids_.begin(), joint_ids_.end(), ids.begin());
-  for (uint i = 0; i < ids.size(); i++) {
-    joints_[i].prev_command.velocity = joints_[i].command.velocity;
-    commands[i] = dynamixel_workbench_.convertVelocity2Value(
-      ids[i], static_cast<float>(joints_[i].command.velocity) * mechanical_reductions_[i]);
-  }
-  if (!dynamixel_workbench_.syncWrite(
-      kGoalVelocityIndex, ids.data(), ids.size(), commands.data(), 1, &log))
-  {
-    RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "%s", log);
-  }
-  return CallbackReturn::SUCCESS;
-}
 
 CallbackReturn DynamixelHardware::set_joint_params()
 {
@@ -527,6 +524,204 @@ CallbackReturn DynamixelHardware::set_joint_params()
   }
   return CallbackReturn::SUCCESS;
 }
+
+CallbackReturn DynamixelHardware::set_joint_velocities()
+{
+  const char * log = nullptr;
+  std::vector<int32_t> commands(info_.joints.size(), 0);
+  std::vector<uint8_t> ids(info_.joints.size(), 0);
+
+  std::copy(joint_ids_.begin(), joint_ids_.end(), ids.begin());
+  for (uint i = 0; i < ids.size(); i++) {
+    joints_[i].prev_command.velocity = joints_[i].command.velocity;
+    commands[i] = dynamixel_workbench_.convertVelocity2Value(
+      ids[i], static_cast<float>(joints_[i].command.velocity) * mechanical_reductions_[i]);
+  }
+  if (!dynamixel_workbench_.syncWrite(
+      kGoalVelocityIndex, ids.data(), ids.size(), commands.data(), 1, &log))
+  {
+    RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "%s", log);
+  }
+  return CallbackReturn::SUCCESS;
+}
+
+
+double DynamixelHardware::convert_external_sensor_to_angle(int joint_index, int32_t adc_value)
+{
+  const auto& cal = calibration_data_[joint_index];
+  
+  if (cal.external_type == "potential") {
+    // Simple linear interpolation between min and max points
+    double adc_range = cal.adc_max - cal.adc_min;
+    double angle_range = cal.angle_max - cal.angle_min;
+    
+    if (adc_range == 0.0) {
+      RCLCPP_WARN(rclcpp::get_logger(kDynamixelHardware), 
+                  "Joint %d: ADC range is zero, using default conversion", joint_index);
+      return static_cast<double>(adc_value) / mechanical_reductions_[joint_index];
+    }
+    
+    // Linear interpolation: angle = angle_min + (adc_value - adc_min) * (angle_range / adc_range)
+    double angle = cal.angle_min + (adc_value - cal.adc_min) * (angle_range / adc_range);
+    
+    return angle;
+  }
+  
+  // Default: return raw value scaled by mechanical reduction
+  return static_cast<double>(adc_value) / mechanical_reductions_[joint_index];
+}
+
+bool DynamixelHardware::check_proximity_limit(int joint_index, double target_angle)
+{
+  const auto& cal = calibration_data_[joint_index];
+  
+  if (cal.external_type == "dual_limit") {
+    // 外部I/O 1,2番から実際のリミット状態を読み取り
+    bool high_limit_triggered = read_external_io(cal.external_io_high);  // I/O 1番 (High limit)
+    bool low_limit_triggered = read_external_io(cal.external_io_low);    // I/O 2番 (Low limit)
+    
+    // High limit検出時：正方向への動作を制限
+    if (high_limit_triggered && target_angle > (joints_[joint_index].state.position + 0.01)) {
+      RCLCPP_WARN(rclcpp::get_logger(kDynamixelHardware), 
+                  "Joint %d: High limit detected, cannot move positive direction", joint_index);
+      return false;
+    }
+    
+    // Low limit検出時：負方向への動作を制限
+    if (low_limit_triggered && target_angle < (joints_[joint_index].state.position - 0.01)) {
+      RCLCPP_WARN(rclcpp::get_logger(kDynamixelHardware),
+                  "Joint %d: Low limit detected, cannot move negative direction", joint_index);
+      return false;
+    }
+    
+    return true;
+  }
+  
+  return true;  // 他のジョイントは制限なし
+}
+
+bool DynamixelHardware::read_external_io(int io_number)
+{
+  if (use_dummy_) {
+    return false;  // ダミーモードでは常にリミット無し
+  }
+  
+  const char * log = nullptr;
+  int32_t external_data = 0;
+  
+  // DynamixelのExternal_Port_Dataから読み取り
+  if (!dynamixel_workbench_.itemRead(joint_ids_[6], "External_Port_Data_1", &external_data, &log)) {
+    RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), 
+                 "Failed to read External_Port_Data_1: %s", log);
+    return false;
+  }
+  
+  // 指定されたI/O番号のビットをチェック
+  bool io_state = false;
+  if (io_number == 1) {
+    io_state = (external_data & 0x01) != 0;  // bit 0
+  } else if (io_number == 2) {
+    io_state = (external_data & 0x02) != 0;  // bit 1
+  }
+  
+  return io_state;  // Highでリミット検出
+}
+
+void DynamixelHardware::restore_multiturn_from_potential()
+{
+  if (use_dummy_) {
+    // ダミーモードでは模擬データでテスト
+    RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), "Dummy mode: Simulating multiturn restoration");
+    for (uint i = 0; i < joints_.size(); i++) {
+      if (external_types_[i] == "potential") {
+        // 模擬データ: potentialから復元する真の角度
+        double true_angle = -1.5 + i * 0.5;  // joint_2: -1.5, joint_3: -1.0
+        double dxl_single_turn = 1.2 + i * 0.3;  // 異なる単一回転位置
+        int turns = calculate_turn_offset(true_angle, dxl_single_turn);
+        
+        RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), 
+                    "Joint %d: Restored multiturn position - True: %.3f rad, Single: %.3f rad, Turns: %d", 
+                    i, true_angle, dxl_single_turn, turns);
+      }
+    }
+    multiturn_restored_ = true;
+    RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), 
+                "Multiturn restoration completed. Switching to Dynamixel position feedback.");
+    return;
+  }
+  
+  const char* log = nullptr;
+  
+  for (uint i = 0; i < joints_.size(); i++) {
+    if (external_types_[i] == "potential") {
+      // 1. 外部センサーから真の角度を取得（既にread()で変換済み）
+      double true_angle = joints_[i].state.position;
+      
+      // 2. Dynamixelの現在の角度（単一回転範囲）を取得
+      int32_t dxl_raw_position;
+      if (!dynamixel_workbench_.itemRead(joint_ids_[i], "Present_Position", &dxl_raw_position, &log)) {
+        RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), 
+                     "Failed to read Present_Position for joint %d: %s", i, log);
+        continue;
+      }
+      
+      double dxl_single_turn = dynamixel_workbench_.convertValue2Radian(joint_ids_[i], dxl_raw_position) / mechanical_reductions_[i];
+      
+      // 3. マルチターン回転数を計算
+      int turns = calculate_turn_offset(true_angle, dxl_single_turn);
+      
+      // 4. 大きな差がある場合は警告
+      double angle_diff = true_angle - dxl_single_turn;
+      if (std::abs(angle_diff) > M_PI) {
+        RCLCPP_WARN(rclcpp::get_logger(kDynamixelHardware), 
+                    "Joint %d: Large position difference detected: %.3f rad (%.1f deg). Turns: %d", 
+                    i, angle_diff, angle_diff * 180.0 / M_PI, turns);
+      }
+      
+      // 5. Goal_Positionをマルチターン対応値に設定
+      double corrected_angle = true_angle * mechanical_reductions_[i];
+      int32_t goal_position = dynamixel_workbench_.convertRadian2Value(joint_ids_[i], corrected_angle);
+      
+      if (dynamixel_workbench_.itemWrite(joint_ids_[i], "Goal_Position", goal_position, &log)) {
+        RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), 
+                    "Joint %d: Restored multiturn position - True: %.3f rad, Single: %.3f rad, Turns: %d", 
+                    i, true_angle, dxl_single_turn, turns);
+      } else {
+        RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), 
+                     "Failed to set Goal_Position for joint %d: %s", i, log);
+      }
+    }
+  }
+  
+  // Mark multiturn restoration as completed
+  multiturn_restored_ = true;
+  RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), 
+              "Multiturn restoration completed. Switching to Dynamixel position feedback.");
+}
+
+int DynamixelHardware::calculate_turn_offset(double true_angle, double single_turn_angle)
+{
+  // 最も近い整数回転数を計算
+  double angle_diff = true_angle - single_turn_angle;
+  return static_cast<int>(std::round(angle_diff / (2.0 * M_PI)));
+}
+
+// void DynamixelHardware::torque_enable_service_callback(
+//   const std::shared_ptr<std_srvs::srv::SetBool::Request> request,
+//   std::shared_ptr<std_srvs::srv::SetBool::Response> response)
+// {
+//   RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), 
+//               "Torque enable service called: %s", request->data ? "true" : "false");
+//   
+//   return_type result = enable_torque(request->data);
+//   
+//   response->success = (result == return_type::OK);
+//   if (response->success) {
+//     response->message = request->data ? "Torque enabled" : "Torque disabled";
+//   } else {
+//     response->message = "Failed to change torque state";
+//   }
+// }
 
 }  // namespace dynamixel_hardware
 

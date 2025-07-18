@@ -24,6 +24,8 @@
 #include <hardware_interface/hardware_info.hpp>
 #include <hardware_interface/system_interface.hpp>
 #include <rclcpp_lifecycle/state.hpp>
+#include <rclcpp/rclcpp.hpp>
+// #include <std_srvs/srv/set_bool.hpp>
 
 #include "dynamixel_hardware/visiblity_control.h"
 #include "rclcpp/macros.hpp"
@@ -40,6 +42,24 @@ struct JointValue
   double effort{0.0};
 };
 
+struct CalibrationData
+{
+  std::string external_type{"none"};
+  
+  // Simple 2-point calibration for potentiometers
+  double angle_min{-3.14};    // Minimum angle [rad]
+  double adc_min{1024.0};     // ADC value at minimum angle
+  double angle_max{3.14};     // Maximum angle [rad] 
+  double adc_max{3072.0};     // ADC value at maximum angle
+  
+  // Dual limit sensor settings (for ID:7)
+  double high_limit{3.14};         // 正側リミット角度
+  double low_limit{-3.14};         // 負側リミット角度
+  int external_io_high{1};         // High limit用外部I/O番号
+  int external_io_low{2};          // Low limit用外部I/O番号
+  double safety_margin{0.1};
+};
+
 struct Joint
 {
   JointValue state{};
@@ -51,12 +71,6 @@ enum class ControlMode
 {
   Position,
   Velocity,
-  Torque,
-  Currrent,
-  ExtendedPosition,
-  MultiTurn,
-  CurrentBasedPosition,
-  PWM,
 };
 
 class DynamixelHardware : public hardware_interface::SystemInterface
@@ -95,16 +109,38 @@ private:
   CallbackReturn set_joint_positions();
   CallbackReturn set_joint_velocities();
   CallbackReturn set_joint_params();
+  
+  // Calibration functions
+  double convert_external_sensor_to_angle(int joint_index, int32_t raw_value);
+  bool check_proximity_limit(int joint_index, double target_angle);
+  bool read_external_io(int io_number);
+  
+  // Multiturn restoration
+  void restore_multiturn_from_potential();
+  int calculate_turn_offset(double true_angle, double single_turn_angle);
+  
+  // Service callbacks
+  // void torque_enable_service_callback(
+  //   const std::shared_ptr<std_srvs::srv::SetBool::Request> request,
+  //   std::shared_ptr<std_srvs::srv::SetBool::Response> response);
 
   DynamixelWorkbench dynamixel_workbench_;
   std::map<const char * const, const ControlItem *> control_items_;
   std::vector<Joint> joints_;
   std::vector<uint8_t> joint_ids_;
   std::vector<double> mechanical_reductions_;
+  std::vector<std::string> external_types_;
+  std::vector<CalibrationData> calibration_data_;
   bool torque_enabled_{false};
   ControlMode control_mode_{ControlMode::Position};
   bool mode_changed_{false};
   bool use_dummy_{false};
+  bool is_external_pos_{false};
+  bool multiturn_restored_{false};
+  
+  // ROS2 services
+  // rclcpp::Node::SharedPtr node_;
+  // rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr torque_service_;
 };
 }  // namespace dynamixel_hardware
 
