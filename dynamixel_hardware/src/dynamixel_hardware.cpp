@@ -305,64 +305,55 @@ return_type DynamixelHardware::read(
     return return_type::OK;
   }
 
-  std::vector<uint8_t> ids(info_.joints.size(), 0);
-  std::vector<int32_t> positions(info_.joints.size(), 0);
-  std::vector<int32_t> currents(info_.joints.size(), 0);
+  const char * log = nullptr;
   std::vector<int32_t> external_positions(info_.joints.size(), 0);
 
-  std::copy(joint_ids_.begin(), joint_ids_.end(), ids.begin());
-  const char * log = nullptr;
-
-  if (!dynamixel_workbench_.syncRead(
-      kPresentPositionCurrentIndex, ids.data(), ids.size(), &log))
-  {
-    RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "%s", log);
+  // 個別Read方式に変更 - 異なる型番のサーボ(PH42/PM54/XM540)に対応
+  for (uint i = 0; i < info_.joints.size(); i++) {
+    int32_t position = 0;
+    int32_t current = 0;
+    
+    // 各サーボから個別に位置情報を読み取り
+    if (!dynamixel_workbench_.itemRead(joint_ids_[i], kPresentPositionItem, &position, &log)) {
+      RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "ID %d position read failed: %s", joint_ids_[i], log);
+      continue;
+    }
+    
+    // 各サーボから個別に電流情報を読み取り
+    if (!dynamixel_workbench_.itemRead(joint_ids_[i], kPresentCurrentItem, &current, &log)) {
+      // Present_Currentが無い場合はPresent_Loadを試行
+      if (!dynamixel_workbench_.itemRead(joint_ids_[i], kPresentLoadItem, &current, &log)) {
+        RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "ID %d current/load read failed: %s", joint_ids_[i], log);
+        current = 0;
+      }
+    }
+    
+    // 位置と電流値を設定
+    joints_[i].state.position = dynamixel_workbench_.convertValue2Radian(joint_ids_[i], position) / mechanical_reductions_[i];
+    joints_[i].state.effort = dynamixel_workbench_.convertValue2Current(current) / mechanical_reductions_[i];
   }
 
-  if (!dynamixel_workbench_.getSyncReadData(
-      kPresentPositionCurrentIndex, ids.data(), ids.size(),
-      control_items_[kPresentCurrentItem]->address,
-      control_items_[kPresentCurrentItem]->data_length, currents.data(), &log))
-  {
-    RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "%s", log);
-  }
-
-  if (!dynamixel_workbench_.getSyncReadData(
-      kPresentPositionCurrentIndex, ids.data(), ids.size(),
-      control_items_[kPresentPositionItem]->address,
-      control_items_[kPresentPositionItem]->data_length, positions.data(), &log))
-  {
-    RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "%s", log);
-  }
-
+  // External position handling (if enabled)
   if (is_external_pos_) {
-    if (!dynamixel_workbench_.syncRead(
-        kExternalPortIndex, ids.data(), ids.size(), &log))
-    {
-      RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "%s", log);
+    for (uint i = 0; i < info_.joints.size(); i++) {
+      int32_t external_data = 0;
+      if (!dynamixel_workbench_.itemRead(joint_ids_[i], kExternalPortItem, &external_data, &log)) {
+        RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "ID %d external port read failed: %s", joint_ids_[i], log);
+        external_data = 0;
+      }
+      external_positions[i] = external_data;
     }
 
-    if (!dynamixel_workbench_.getSyncReadData(
-        kExternalPortIndex, ids.data(), ids.size(),
-        control_items_[kExternalPortItem]->address,
-        control_items_[kExternalPortItem]->data_length, external_positions.data(), &log))
-    {
-      RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "%s", log);
+    // Apply external position logic
+    for (uint i = 0; i < info_.joints.size(); i++) {
+      // Use external sensor for position only if multiturn restoration hasn't been completed
+      if (!multiturn_restored_ && external_types_[i] == "potential") {
+        // Use external potentiometer reading with calibration (only during startup)
+        joints_[i].state.position = convert_external_sensor_to_angle(i, external_positions[i]);
+      } else if (is_external_pos_ && external_types_[i] == "none") {
+        joints_[i].state.position = static_cast<double>(external_positions[i]) / mechanical_reductions_[i];
+      }
     }
-  }
-
-  for (uint i = 0; i < ids.size(); i++) {
-    // Use external sensor for position only if multiturn restoration hasn't been completed
-    if (!multiturn_restored_ && external_types_[i] == "potential") {
-      // Use external potentiometer reading with calibration (only during startup)
-      joints_[i].state.position = convert_external_sensor_to_angle(i, external_positions[i]);
-    } else if (is_external_pos_ && external_types_[i] == "none") {
-      joints_[i].state.position = static_cast<double>(external_positions[i]) / mechanical_reductions_[i];
-    } else {
-      // Use internal Dynamixel position reading (normal operation)
-      joints_[i].state.position = dynamixel_workbench_.convertValue2Radian(ids[i], positions[i]) / mechanical_reductions_[i];
-    }
-    joints_[i].state.effort = dynamixel_workbench_.convertValue2Current(currents[i]) / mechanical_reductions_[i];
   }
 
   return return_type::OK;
@@ -487,19 +478,18 @@ return_type DynamixelHardware::reset_command()
 CallbackReturn DynamixelHardware::set_joint_positions()
 {
   const char * log = nullptr;
-  std::vector<int32_t> commands(info_.joints.size(), 0);
-  std::vector<uint8_t> ids(info_.joints.size(), 0);
 
-  std::copy(joint_ids_.begin(), joint_ids_.end(), ids.begin());
-  for (uint i = 0; i < ids.size(); i++) {
+  // 個別Write方式に変更 - 異なる型番のサーボ(PH42/PM54/XM540)に対応
+  for (uint i = 0; i < info_.joints.size(); i++) {
     joints_[i].prev_command.position = joints_[i].command.position;
-    commands[i] = dynamixel_workbench_.convertRadian2Value(
-      ids[i], static_cast<float>(joints_[i].command.position) * mechanical_reductions_[i]);
-  }
-  if (!dynamixel_workbench_.syncWrite(
-      kGoalPositionIndex, ids.data(), ids.size(), commands.data(), 1, &log))
-  {
-    RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "%s", log);
+    
+    // 各サーボへ個別にGoal_Positionを送信
+    int32_t goal_position = dynamixel_workbench_.convertRadian2Value(
+      joint_ids_[i], static_cast<float>(joints_[i].command.position) * mechanical_reductions_[i]);
+    
+    if (!dynamixel_workbench_.itemWrite(joint_ids_[i], kGoalPositionItem, goal_position, &log)) {
+      RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "ID %d goal position write failed: %s", joint_ids_[i], log);
+    }
   }
   return CallbackReturn::SUCCESS;
 }
@@ -528,19 +518,18 @@ CallbackReturn DynamixelHardware::set_joint_params()
 CallbackReturn DynamixelHardware::set_joint_velocities()
 {
   const char * log = nullptr;
-  std::vector<int32_t> commands(info_.joints.size(), 0);
-  std::vector<uint8_t> ids(info_.joints.size(), 0);
 
-  std::copy(joint_ids_.begin(), joint_ids_.end(), ids.begin());
-  for (uint i = 0; i < ids.size(); i++) {
+  // 個別Write方式に変更 - 異なる型番のサーボ(PH42/PM54/XM540)に対応
+  for (uint i = 0; i < info_.joints.size(); i++) {
     joints_[i].prev_command.velocity = joints_[i].command.velocity;
-    commands[i] = dynamixel_workbench_.convertVelocity2Value(
-      ids[i], static_cast<float>(joints_[i].command.velocity) * mechanical_reductions_[i]);
-  }
-  if (!dynamixel_workbench_.syncWrite(
-      kGoalVelocityIndex, ids.data(), ids.size(), commands.data(), 1, &log))
-  {
-    RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "%s", log);
+    
+    // 各サーボへ個別にGoal_Velocityを送信
+    int32_t goal_velocity = dynamixel_workbench_.convertVelocity2Value(
+      joint_ids_[i], static_cast<float>(joints_[i].command.velocity) * mechanical_reductions_[i]);
+    
+    if (!dynamixel_workbench_.itemWrite(joint_ids_[i], kGoalVelocityItem, goal_velocity, &log)) {
+      RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "ID %d goal velocity write failed: %s", joint_ids_[i], log);
+    }
   }
   return CallbackReturn::SUCCESS;
 }
