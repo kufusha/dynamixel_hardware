@@ -660,25 +660,31 @@ void DynamixelHardware::restore_multiturn_from_potential()
       // 3. マルチターン回転数を計算
       int turns = calculate_turn_offset(true_angle, dxl_single_turn);
       
-      // 4. 大きな差がある場合は警告
+      // 4. Extended Position Control対応: 直接マルチターン位置を設定
+      if (info_.joints[i].parameters.find("operating_mode") != info_.joints[i].parameters.end() &&
+          std::stoi(info_.joints[i].parameters.at("operating_mode")) == 4) {
+        
+        // Extended Position値を計算（-1,048,575 ～ +1,048,575）
+        int32_t extended_position = static_cast<int32_t>(
+          true_angle * mechanical_reductions_[i] * (4096.0 / (2 * M_PI)));
+        
+        // Extended Position Modeで直接マルチターン位置を設定
+        if (!dynamixel_workbench_.itemWrite(joint_ids_[i], "Goal_Position", extended_position, &log)) {
+          RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), 
+                       "Failed to set extended position for joint %d: %s", i, log);
+        } else {
+          RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware),
+                      "Joint %d: Set extended position %d (true angle: %.3f rad)", 
+                      i, extended_position, true_angle);
+        }
+      }
+      
+      // 5. 大きな差がある場合は警告
       double angle_diff = true_angle - dxl_single_turn;
       if (std::abs(angle_diff) > M_PI) {
         RCLCPP_WARN(rclcpp::get_logger(kDynamixelHardware), 
                     "Joint %d: Large position difference detected: %.3f rad (%.1f deg). Turns: %d", 
                     i, angle_diff, angle_diff * 180.0 / M_PI, turns);
-      }
-      
-      // 5. Goal_Positionをマルチターン対応値に設定
-      double corrected_angle = true_angle * mechanical_reductions_[i];
-      int32_t goal_position = dynamixel_workbench_.convertRadian2Value(joint_ids_[i], corrected_angle);
-      
-      if (dynamixel_workbench_.itemWrite(joint_ids_[i], "Goal_Position", goal_position, &log)) {
-        RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), 
-                    "Joint %d: Restored multiturn position - True: %.3f rad, Single: %.3f rad, Turns: %d", 
-                    i, true_angle, dxl_single_turn, turns);
-      } else {
-        RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), 
-                     "Failed to set Goal_Position for joint %d: %s", i, log);
       }
     }
   }
