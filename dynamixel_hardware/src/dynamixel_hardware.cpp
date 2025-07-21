@@ -280,10 +280,11 @@ CallbackReturn DynamixelHardware::on_configure(const rclcpp_lifecycle::State & /
   }
   read(rclcpp::Time{}, rclcpp::Duration(0, 0));
   
-  // Restore multiturn position from potential sensors
+  reset_command();
+  
+  // Restore multiturn position from potential sensors (before torque enable)
   restore_multiturn_from_potential();
   
-  reset_command();
   write(rclcpp::Time{}, rclcpp::Duration(0, 0));
 
   enable_torque(true);
@@ -668,13 +669,13 @@ void DynamixelHardware::restore_multiturn_from_potential()
         int32_t extended_position = static_cast<int32_t>(
           true_angle * mechanical_reductions_[i] * (4096.0 / (2 * M_PI)));
         
-        // Extended Position Modeで直接マルチターン位置を設定
-        if (!dynamixel_workbench_.itemWrite(joint_ids_[i], "Goal_Position", extended_position, &log)) {
+        // Extended Position Modeで Present_Position を設定（トルクOFF時のみ有効）
+        if (!dynamixel_workbench_.itemWrite(joint_ids_[i], "Present_Position", extended_position, &log)) {
           RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), 
-                       "Failed to set extended position for joint %d: %s", i, log);
+                       "Failed to set extended present position for joint %d: %s", i, log);
         } else {
           RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware),
-                      "Joint %d: Set extended position %d (true angle: %.3f rad)", 
+                      "Joint %d: Set extended present position %d (true angle: %.3f rad)", 
                       i, extended_position, true_angle);
         }
       }
