@@ -104,6 +104,8 @@ private:
 
   return_type set_control_mode(const ControlMode & mode, const bool force_set = false);
 
+  void set_operating_modes();
+
   return_type reset_command();
 
   CallbackReturn set_joint_positions();

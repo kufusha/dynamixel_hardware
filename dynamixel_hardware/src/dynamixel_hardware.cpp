@@ -165,6 +165,7 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
 
   enable_torque(false);
   set_control_mode(ControlMode::Position, true);
+  set_operating_modes();  // Extended Position Control設定
   set_joint_params();
 
   const ControlItem * goal_position =
@@ -704,6 +705,33 @@ int DynamixelHardware::calculate_turn_offset(double true_angle, double single_tu
   // 最も近い整数回転数を計算
   double angle_diff = true_angle - single_turn_angle;
   return static_cast<int>(std::round(angle_diff / (2.0 * M_PI)));
+}
+
+void DynamixelHardware::set_operating_modes()
+{
+  const char * log = nullptr;
+  
+  for (uint i = 0; i < info_.joints.size(); ++i) {
+    // operating_modeパラメータが設定されているかチェック
+    auto param_it = info_.joints[i].parameters.find("operating_mode");
+    if (param_it != info_.joints[i].parameters.end()) {
+      int operating_mode = std::stoi(param_it->second);
+      
+      RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), 
+                  "Setting joint %s (ID:%d) to operating mode %d", 
+                  info_.joints[i].name.c_str(), joint_ids_[i], operating_mode);
+      
+      if (!dynamixel_workbench_.setOperatingMode(joint_ids_[i], operating_mode, &log)) {
+        RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), 
+                     "Failed to set operating mode for joint %s: %s", 
+                     info_.joints[i].name.c_str(), log);
+      } else {
+        RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware),
+                    "Successfully set operating mode %d for joint %s", 
+                    operating_mode, info_.joints[i].name.c_str());
+      }
+    }
+  }
 }
 
 // void DynamixelHardware::torque_enable_service_callback(
