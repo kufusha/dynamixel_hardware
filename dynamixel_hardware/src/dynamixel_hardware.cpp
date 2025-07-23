@@ -164,8 +164,7 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
   }
 
   enable_torque(false);
-  set_control_mode(ControlMode::Position, true);
-  set_operating_modes();  // Extended Position Control設定
+  set_operating_modes();  // Extended Position Control設定 (先に実行)
   set_joint_params();
 
   const ControlItem * goal_position =
@@ -285,7 +284,8 @@ CallbackReturn DynamixelHardware::on_configure(const rclcpp_lifecycle::State & /
   // Restore multiturn position from potential sensors (before torque enable)
   restore_multiturn_from_potential();
   
-  write(rclcpp::Time{}, rclcpp::Duration(0, 0));
+  // Don't write initial position commands to avoid unexpected movement
+  // write(rclcpp::Time{}, rclcpp::Duration(0, 0));
 
   enable_torque(true);
 
@@ -348,13 +348,13 @@ return_type DynamixelHardware::read(
 
     // Apply external position logic
     for (uint i = 0; i < info_.joints.size(); i++) {
-      // Use external sensor for position only if multiturn restoration hasn't been completed
-      if (!multiturn_restored_ && external_types_[i] == "potential") {
-        // Use external potentiometer reading with calibration (only during startup)
+      // Use external sensor for position based on configuration
+      if (is_external_pos_ && external_types_[i] == "potential") {
+        // Use external potentiometer reading with calibration
         joints_[i].state.position = convert_external_sensor_to_angle(i, external_positions[i]);
-      } else if (is_external_pos_ && external_types_[i] == "none") {
-        joints_[i].state.position = static_cast<double>(external_positions[i]) / mechanical_reductions_[i];
       }
+      // For joints without external sensors (external_type != "potential"), 
+      // keep using Dynamixel internal position (already set above)
     }
   }
 
@@ -410,7 +410,8 @@ return_type DynamixelHardware::enable_torque(const bool enabled)
         return return_type::ERROR;
       }
     }
-    reset_command();
+    // Don't reset command during torque enable to avoid unexpected movement
+    // reset_command();
     RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), "Torque enabled");
   } else if (!enabled && torque_enabled_) {
     for (uint i = 0; i < info_.joints.size(); ++i) {
@@ -431,6 +432,22 @@ return_type DynamixelHardware::set_control_mode(const ControlMode & mode, const 
   const char * log = nullptr;
   mode_changed_ = false;
 
+  // Check if any joints have custom operating_mode parameters
+  bool has_custom_operating_modes = false;
+  for (uint i = 0; i < info_.joints.size(); ++i) {
+    if (info_.joints[i].parameters.find("operating_mode") != info_.joints[i].parameters.end()) {
+      has_custom_operating_modes = true;
+      break;
+    }
+  }
+
+  // If custom operating modes are set, skip default position control mode setting
+  if (has_custom_operating_modes) {
+    RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), 
+                "Custom operating modes detected, skipping default position control setup");
+    control_mode_ = ControlMode::Position;  // Assume position-based control
+    return return_type::OK;
+  }
 
   if (mode == ControlMode::Position && (force_set || control_mode_ != ControlMode::Position)) {
     bool torque_enabled = torque_enabled_;
