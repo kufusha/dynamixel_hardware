@@ -702,16 +702,6 @@ void DynamixelHardware::restore_multiturn_from_potential()
                       "Joint %d: Set extended present position %d (true angle: %.3f rad)", 
                       i, extended_position, true_angle);
         }
-        
-        // Goal_Position も同期して不意な動作を防ぐ（復元時の一回のみ）
-        if (!dynamixel_workbench_.itemWrite(joint_ids_[i], "Goal_Position", extended_position, &log)) {
-          RCLCPP_WARN(rclcpp::get_logger(kDynamixelHardware), 
-                      "Failed to sync Goal_Position for joint %d: %s", i, log);
-        } else {
-          RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware),
-                      "Joint %d: Synced Goal_Position %d with Present_Position (startup only)", 
-                      i, extended_position);
-        }
       }
       
       // 5. 大きな差がある場合は警告
