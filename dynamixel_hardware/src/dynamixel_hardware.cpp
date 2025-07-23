@@ -667,52 +667,6 @@ void DynamixelHardware::restore_multiturn_from_potential()
   
   const char* log = nullptr;
   
-  for (uint i = 0; i < joints_.size(); i++) {
-    if (external_types_[i] == "potential") {
-      // 1. 外部センサーから真の角度を取得（既にread()で変換済み）
-      double true_angle = joints_[i].state.position;
-      
-      // 2. Dynamixelの現在の角度（単一回転範囲）を取得
-      int32_t dxl_raw_position;
-      if (!dynamixel_workbench_.itemRead(joint_ids_[i], "Present_Position", &dxl_raw_position, &log)) {
-        RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), 
-                     "Failed to read Present_Position for joint %d: %s", i, log);
-        continue;
-      }
-      
-      double dxl_single_turn = dynamixel_workbench_.convertValue2Radian(joint_ids_[i], dxl_raw_position) / mechanical_reductions_[i];
-      
-      // 3. マルチターン回転数を計算
-      int turns = calculate_turn_offset(true_angle, dxl_single_turn);
-      
-      // 4. Extended Position Control対応: 直接マルチターン位置を設定
-      if (info_.joints[i].parameters.find("operating_mode") != info_.joints[i].parameters.end() &&
-          std::stoi(info_.joints[i].parameters.at("operating_mode")) == 4) {
-        
-        // Extended Position値を計算（-1,048,575 ～ +1,048,575）
-        int32_t extended_position = static_cast<int32_t>(
-          true_angle * mechanical_reductions_[i] * (4096.0 / (2 * M_PI)));
-        
-        // Extended Position Modeで Present_Position を設定（トルクOFF時のみ有効）
-        if (!dynamixel_workbench_.itemWrite(joint_ids_[i], "Present_Position", extended_position, &log)) {
-          RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), 
-                       "Failed to set extended present position for joint %d: %s", i, log);
-        } else {
-          RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware),
-                      "Joint %d: Set extended present position %d (true angle: %.3f rad)", 
-                      i, extended_position, true_angle);
-        }
-      }
-      
-      // 5. 大きな差がある場合は警告
-      double angle_diff = true_angle - dxl_single_turn;
-      if (std::abs(angle_diff) > M_PI) {
-        RCLCPP_WARN(rclcpp::get_logger(kDynamixelHardware), 
-                    "Joint %d: Large position difference detected: %.3f rad (%.1f deg). Turns: %d", 
-                    i, angle_diff, angle_diff * 180.0 / M_PI, turns);
-      }
-    }
-  }
   
   // Mark multiturn restoration as completed
   multiturn_restored_ = true;
