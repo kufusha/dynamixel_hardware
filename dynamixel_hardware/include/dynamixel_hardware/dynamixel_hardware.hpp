@@ -140,6 +140,27 @@ private:
   bool is_external_pos_{false};
   bool multiturn_restored_{false};
   
+  // Exponential Moving Average filter for ADC noise reduction
+  struct EMAFilter {
+    double alpha;
+    double filtered_value;
+    bool initialized;
+    
+    EMAFilter(double alpha_val = 0.2) : alpha(alpha_val), filtered_value(0.0), initialized(false) {}
+    
+    double update(double new_value) {
+      if (!initialized) {
+        filtered_value = new_value;
+        initialized = true;
+      } else {
+        filtered_value = alpha * new_value + (1.0 - alpha) * filtered_value;
+      }
+      return filtered_value;
+    }
+  };
+  
+  std::vector<EMAFilter> adc_filters_;
+  
   // ROS2 services
   // rclcpp::Node::SharedPtr node_;
   // rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr torque_service_;

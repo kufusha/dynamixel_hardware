@@ -71,6 +71,7 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
   mechanical_reductions_.resize(info_.joints.size(), 1.0);
   external_types_.resize(info_.joints.size(), "none");
   calibration_data_.resize(info_.joints.size(), CalibrationData());
+  adc_filters_.resize(info_.joints.size(), EMAFilter(0.2));  // α=0.2 for moderate filtering
 
   for (uint i = 0; i < info_.joints.size(); i++) {
     joint_ids_[i] = std::stoi(info_.joints[i].parameters.at("id"));
@@ -343,6 +344,12 @@ return_type DynamixelHardware::read(
         RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "ID %d external port read failed: %s", joint_ids_[i], log);
         external_data = 0;
       }
+      
+      // Apply EMA filter for potentiometer joints to reduce noise
+      if (external_types_[i] == "potential") {
+        external_data = static_cast<int32_t>(adc_filters_[i].update(static_cast<double>(external_data)));
+      }
+      
       external_positions[i] = external_data;
     }
 
