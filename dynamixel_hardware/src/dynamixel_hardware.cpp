@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <limits>
 #include <string>
 #include <vector>
@@ -373,6 +374,9 @@ return_type DynamixelHardware::read(
       // For joints without external sensors (external_type != "potential"), 
       // keep using Dynamixel internal position (already set above)
     }
+    
+    // Hybrid offset management - monitor and update offsets dynamically
+    smart_offset_management();
   }
 
   return return_type::OK;
@@ -801,6 +805,13 @@ void DynamixelHardware::calibrate_potential_offsets()
   }
   
   offsets_calibrated_ = true;
+  last_full_calibration_ = std::chrono::steady_clock::now();
+  
+  // 初期オフセット履歴を設定
+  for (auto& [joint_index, offset] : potential_offset_map_) {
+    offset_history_[joint_index] = offset;
+  }
+  
   RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), 
               "Potential sensor offset calibration completed");
 }
@@ -925,6 +936,133 @@ void DynamixelHardware::emergency_move_to_safe_position(int joint_index)
     RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), 
                 "Emergency move completed for joint %d", joint_index);
   }
+}
+
+void DynamixelHardware::smart_offset_management()
+{
+  if (!offsets_calibrated_) {
+    return;  // まだ初期校正されていない
+  }
+  
+  auto now = std::chrono::steady_clock::now();
+  
+  // 1. 定期的な全体校正チェック（案2の要素）
+  if (now - last_full_calibration_ > FULL_RECALIBRATION_INTERVAL) {
+    RCLCPP_DEBUG(rclcpp::get_logger(kDynamixelHardware), 
+                "Performing periodic full recalibration");
+    full_recalibration();
+    return;
+  }
+  
+  // 2. 即応的偏差チェック（案1の要素）
+  for (uint i = 0; i < joints_.size(); i++) {
+    if (external_types_[i] == "potential") {
+      update_offset_if_needed(i);
+    }
+  }
+}
+
+void DynamixelHardware::update_offset_if_needed(int joint_index)
+{
+  double current_offset = calculate_current_offset(joint_index);
+  
+  auto stored_it = potential_offset_map_.find(joint_index);
+  if (stored_it == potential_offset_map_.end()) {
+    return;  // オフセット未設定
+  }
+  
+  double stored_offset = stored_it->second;
+  double deviation = std::abs(current_offset - stored_offset);
+  
+  // 閾値を超えた偏差を検出
+  if (deviation > OFFSET_DEVIATION_THRESHOLD) {
+    RCLCPP_WARN(rclcpp::get_logger(kDynamixelHardware), 
+                "Joint %d offset deviation detected: %.3f rad (%.1f deg), updating offset from %.3f to %.3f",
+                joint_index, deviation, deviation * 180.0 / M_PI, 
+                stored_offset, current_offset);
+    
+    // オフセット更新（スムージング適用）
+    double smoothing_factor = 0.3;  // 30%の重み
+    double new_offset = stored_offset * (1 - smoothing_factor) + current_offset * smoothing_factor;
+    
+    potential_offset_map_[joint_index] = new_offset;
+    offset_history_[joint_index] = new_offset;
+    
+    RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), 
+                "Joint %d offset updated to %.3f rad (%.1f deg)", 
+                joint_index, new_offset, new_offset * 180.0 / M_PI);
+  }
+}
+
+void DynamixelHardware::full_recalibration()
+{
+  RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), 
+              "Starting full offset recalibration");
+  
+  bool any_changes = false;
+  
+  for (uint i = 0; i < joints_.size(); i++) {
+    if (external_types_[i] == "potential") {
+      double current_offset = calculate_current_offset(i);
+      
+      auto stored_it = potential_offset_map_.find(i);
+      if (stored_it != potential_offset_map_.end()) {
+        double old_offset = stored_it->second;
+        double change = std::abs(current_offset - old_offset);
+        
+        if (change > 0.005) {  // 0.3度以上の変化
+          RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), 
+                      "Joint %d full recalibration: %.3f -> %.3f rad (change: %.3f rad / %.1f deg)",
+                      i, old_offset, current_offset, change, change * 180.0 / M_PI);
+          
+          potential_offset_map_[i] = current_offset;
+          offset_history_[i] = current_offset;
+          any_changes = true;
+        }
+      }
+    }
+  }
+  
+  last_full_calibration_ = std::chrono::steady_clock::now();
+  
+  if (any_changes) {
+    RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), 
+                "Full recalibration completed with updates");
+  } else {
+    RCLCPP_DEBUG(rclcpp::get_logger(kDynamixelHardware), 
+                 "Full recalibration completed - no significant changes");
+  }
+}
+
+double DynamixelHardware::calculate_current_offset(int joint_index)
+{
+  if (use_dummy_) {
+    // ダミーモードでは模擬的な変動
+    return -0.035 + (std::rand() % 10 - 5) * 0.001;  // ±5度のランダム変動
+  }
+  
+  const char* log = nullptr;
+  
+  // 1. potentialセンサーから現在角度を取得
+  int32_t external_data;
+  if (!dynamixel_workbench_.itemRead(joint_ids_[joint_index], "External_Port_Data_1", &external_data, &log)) {
+    RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), 
+                 "Failed to read external sensor for offset calculation: %s", log);
+    return 0.0;
+  }
+  double potential_angle = convert_external_sensor_to_angle(joint_index, external_data);
+  
+  // 2. DynamixelのPresent_Positionを取得
+  int32_t dxl_raw_position;
+  if (!dynamixel_workbench_.itemRead(joint_ids_[joint_index], "Present_Position", &dxl_raw_position, &log)) {
+    RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), 
+                 "Failed to read Present_Position for offset calculation: %s", log);
+    return 0.0;
+  }
+  double dynamixel_angle = dynamixel_workbench_.convertValue2Radian(joint_ids_[joint_index], dxl_raw_position) / mechanical_reductions_[joint_index];
+  
+  // 3. 現在のオフセット計算
+  return potential_angle - dynamixel_angle;
 }
 
 }  // namespace dynamixel_hardware

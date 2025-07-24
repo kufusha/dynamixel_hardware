@@ -126,6 +126,12 @@ private:
   double apply_potential_offset(int joint_index, double goal_position);
   double get_corrected_dynamixel_position(int joint_index);
   
+  // Hybrid offset management
+  void smart_offset_management();
+  void update_offset_if_needed(int joint_index);
+  void full_recalibration();
+  double calculate_current_offset(int joint_index);
+  
   // Safety functions
   double clamp_to_safe_range(int joint_index, double angle);
   bool is_in_safe_range(int joint_index, double angle);
@@ -153,6 +159,12 @@ private:
   // Offset management for potential sensor joints
   std::map<int, double> potential_offset_map_;  // joint_index -> offset value
   bool offsets_calibrated_{false};
+  
+  // Hybrid offset management
+  std::map<int, double> offset_history_;  // For deviation tracking
+  std::chrono::steady_clock::time_point last_full_calibration_;
+  static constexpr double OFFSET_DEVIATION_THRESHOLD = 0.02;  // 1.1度の閾値
+  static constexpr std::chrono::seconds FULL_RECALIBRATION_INTERVAL{10};  // 10秒間隔
   
   // Exponential Moving Average filter for ADC noise reduction
   struct EMAFilter {
