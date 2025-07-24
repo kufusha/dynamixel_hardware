@@ -288,6 +288,13 @@ CallbackReturn DynamixelHardware::on_configure(const rclcpp_lifecycle::State & /
   // Calibrate potential sensor offsets
   calibrate_potential_offsets();
   
+  // Safety check: Move dangerous joints to safe positions
+  for (uint i = 0; i < joints_.size(); i++) {
+    if (external_types_[i] == "potential") {
+      emergency_move_to_safe_position(i);
+    }
+  }
+  
   // Don't write initial position commands to avoid unexpected movement
   // write(rclcpp::Time{}, rclcpp::Duration(0, 0));
 
@@ -512,8 +519,17 @@ CallbackReturn DynamixelHardware::set_joint_positions()
   for (uint i = 0; i < info_.joints.size(); i++) {
     joints_[i].prev_command.position = joints_[i].command.position;
     
+    // 安全範囲チェック
+    double safe_command = clamp_to_safe_range(i, joints_[i].command.position);
+    if (std::abs(safe_command - joints_[i].command.position) > 0.01) {
+      RCLCPP_WARN(rclcpp::get_logger(kDynamixelHardware), 
+                  "Joint %d command clamped: %.3f -> %.3f rad (%.1f -> %.1f deg)",
+                  i, joints_[i].command.position, safe_command,
+                  joints_[i].command.position * 180.0 / M_PI, safe_command * 180.0 / M_PI);
+    }
+    
     // potentialセンサージョイントの場合、オフセット補正を適用
-    double corrected_position = apply_potential_offset(i, joints_[i].command.position);
+    double corrected_position = apply_potential_offset(i, safe_command);
     
     // 各サーボへ個別にGoal_Positionを送信
     int32_t goal_position = dynamixel_workbench_.convertRadian2Value(
@@ -833,6 +849,82 @@ double DynamixelHardware::get_corrected_dynamixel_position(int joint_index)
   }
   
   return dynamixel_angle;  // Dynamixel生値
+}
+
+double DynamixelHardware::clamp_to_safe_range(int joint_index, double angle)
+{
+  // Joint-specific safety limits
+  switch (joint_index) {
+    case 1:  // arm_joint_2 (ID:2)
+      // 可動域: 0° ~ -180° (-3.14159 rad)
+      return std::clamp(angle, -M_PI, 0.0);
+      
+    case 2:  // arm_joint_3 (ID:3)
+      // 可動域: 0° ~ 180° (3.14159 rad)
+      return std::clamp(angle, 0.0, M_PI);
+      
+    // 他のジョイントも必要に応じて追加
+    default:
+      return angle;  // 制限なし
+  }
+}
+
+bool DynamixelHardware::is_in_safe_range(int joint_index, double angle)
+{
+  double clamped = clamp_to_safe_range(joint_index, angle);
+  double tolerance = 0.05;  // 3度程度の許容範囲
+  return std::abs(angle - clamped) < tolerance;
+}
+
+void DynamixelHardware::emergency_move_to_safe_position(int joint_index)
+{
+  if (use_dummy_) {
+    RCLCPP_WARN(rclcpp::get_logger(kDynamixelHardware), 
+                "Dummy mode: Simulating emergency move for joint %d", joint_index);
+    return;
+  }
+
+  const char* log = nullptr;
+  
+  // 現在の外部センサー値を取得
+  double current_angle = 0.0;
+  if (external_types_[joint_index] == "potential") {
+    int32_t external_data;
+    if (dynamixel_workbench_.itemRead(joint_ids_[joint_index], "External_Port_Data_1", &external_data, &log)) {
+      current_angle = convert_external_sensor_to_angle(joint_index, external_data);
+    }
+  } else {
+    // Dynamixel位置を使用
+    current_angle = get_corrected_dynamixel_position(joint_index);
+  }
+  
+  // 安全範囲内かチェック
+  if (is_in_safe_range(joint_index, current_angle)) {
+    return;  // 既に安全範囲内
+  }
+  
+  // 最寄りの安全位置を計算
+  double safe_position = clamp_to_safe_range(joint_index, current_angle);
+  
+  RCLCPP_WARN(rclcpp::get_logger(kDynamixelHardware), 
+              "EMERGENCY: Joint %d at unsafe position %.3f rad (%.1f°), moving to safe position %.3f rad (%.1f°)",
+              joint_index, current_angle, current_angle * 180.0 / M_PI,
+              safe_position, safe_position * 180.0 / M_PI);
+  
+  // オフセット補正を適用して安全位置に移動
+  double corrected_safe_position = apply_potential_offset(joint_index, safe_position);
+  
+  // 緊急移動実行
+  int32_t goal_position = dynamixel_workbench_.convertRadian2Value(
+    joint_ids_[joint_index], static_cast<float>(corrected_safe_position) * mechanical_reductions_[joint_index]);
+  
+  if (!dynamixel_workbench_.itemWrite(joint_ids_[joint_index], kGoalPositionItem, goal_position, &log)) {
+    RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), 
+                 "EMERGENCY MOVE FAILED for joint %d: %s", joint_index, log);
+  } else {
+    RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), 
+                "Emergency move completed for joint %d", joint_index);
+  }
 }
 
 }  // namespace dynamixel_hardware

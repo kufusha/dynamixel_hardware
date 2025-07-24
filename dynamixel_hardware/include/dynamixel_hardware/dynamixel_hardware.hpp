@@ -126,6 +126,11 @@ private:
   double apply_potential_offset(int joint_index, double goal_position);
   double get_corrected_dynamixel_position(int joint_index);
   
+  // Safety functions
+  double clamp_to_safe_range(int joint_index, double angle);
+  bool is_in_safe_range(int joint_index, double angle);
+  void emergency_move_to_safe_position(int joint_index);
+  
   // Service callbacks
   // void torque_enable_service_callback(
   //   const std::shared_ptr<std_srvs::srv::SetBool::Request> request,
