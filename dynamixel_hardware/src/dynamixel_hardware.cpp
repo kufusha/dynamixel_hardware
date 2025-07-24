@@ -285,6 +285,9 @@ CallbackReturn DynamixelHardware::on_configure(const rclcpp_lifecycle::State & /
   // Restore multiturn position from potential sensors (before torque enable)
   restore_multiturn_from_potential();
   
+  // Calibrate potential sensor offsets
+  calibrate_potential_offsets();
+  
   // Don't write initial position commands to avoid unexpected movement
   // write(rclcpp::Time{}, rclcpp::Duration(0, 0));
 
@@ -509,9 +512,12 @@ CallbackReturn DynamixelHardware::set_joint_positions()
   for (uint i = 0; i < info_.joints.size(); i++) {
     joints_[i].prev_command.position = joints_[i].command.position;
     
+    // potentialセンサージョイントの場合、オフセット補正を適用
+    double corrected_position = apply_potential_offset(i, joints_[i].command.position);
+    
     // 各サーボへ個別にGoal_Positionを送信
     int32_t goal_position = dynamixel_workbench_.convertRadian2Value(
-      joint_ids_[i], static_cast<float>(joints_[i].command.position) * mechanical_reductions_[i]);
+      joint_ids_[i], static_cast<float>(corrected_position) * mechanical_reductions_[i]);
     
     if (!dynamixel_workbench_.itemWrite(joint_ids_[i], kGoalPositionItem, goal_position, &log)) {
       RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "ID %d goal position write failed: %s", joint_ids_[i], log);
@@ -724,6 +730,110 @@ void DynamixelHardware::set_operating_modes()
 //     response->message = "Failed to change torque state";
 //   }
 // }
+
+void DynamixelHardware::calibrate_potential_offsets()
+{
+  if (use_dummy_) {
+    // ダミーモードでは模擬オフセット
+    RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), "Dummy mode: Simulating offset calibration");
+    for (uint i = 0; i < joints_.size(); i++) {
+      if (external_types_[i] == "potential") {
+        // 模擬オフセット（約-0.035 rad = -2度のずれ）
+        potential_offset_map_[i] = -0.035;
+        RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), 
+                    "Joint %d: Dummy offset calibrated: %.3f rad (%.1f deg)", 
+                    i, potential_offset_map_[i], potential_offset_map_[i] * 180.0 / M_PI);
+      }
+    }
+    offsets_calibrated_ = true;
+    RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), 
+                "Offset calibration completed (dummy mode)");
+    return;
+  }
+
+  const char* log = nullptr;
+  RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), "Calibrating potential sensor offsets...");
+  
+  for (uint i = 0; i < joints_.size(); i++) {
+    if (external_types_[i] == "potential") {
+      // 1. potentialセンサーから現在角度を取得
+      int32_t external_data;
+      if (!dynamixel_workbench_.itemRead(joint_ids_[i], "External_Port_Data_1", &external_data, &log)) {
+        RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), 
+                     "Failed to read external sensor for joint %d: %s", i, log);
+        continue;
+      }
+      double potential_angle = convert_external_sensor_to_angle(i, external_data);
+      
+      // 2. DynamixelのPresent_Positionを取得
+      int32_t dxl_raw_position;
+      if (!dynamixel_workbench_.itemRead(joint_ids_[i], "Present_Position", &dxl_raw_position, &log)) {
+        RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), 
+                     "Failed to read Present_Position for joint %d: %s", i, log);
+        continue;
+      }
+      double dynamixel_angle = dynamixel_workbench_.convertValue2Radian(joint_ids_[i], dxl_raw_position) / mechanical_reductions_[i];
+      
+      // 3. オフセット計算（potential基準 - Dynamixel基準）
+      double offset = potential_angle - dynamixel_angle;
+      potential_offset_map_[i] = offset;
+      
+      RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), 
+                  "Joint %d: Offset calibrated - Potential: %.3f rad, Dynamixel: %.3f rad, Offset: %.3f rad (%.1f deg)", 
+                  i, potential_angle, dynamixel_angle, offset, offset * 180.0 / M_PI);
+    }
+  }
+  
+  offsets_calibrated_ = true;
+  RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), 
+              "Potential sensor offset calibration completed");
+}
+
+double DynamixelHardware::apply_potential_offset(int joint_index, double goal_position)
+{
+  if (!offsets_calibrated_ || external_types_[joint_index] != "potential") {
+    return goal_position;  // オフセット未校正または非potentialジョイント
+  }
+  
+  auto it = potential_offset_map_.find(joint_index);
+  if (it == potential_offset_map_.end()) {
+    return goal_position;  // オフセット情報なし
+  }
+  
+  // MoveItからの目標位置（potential基準）をDynamixel基準に変換
+  double corrected_goal = goal_position - it->second;
+  
+  RCLCPP_DEBUG(rclcpp::get_logger(kDynamixelHardware), 
+               "Joint %d: Goal offset applied - Original: %.3f, Corrected: %.3f, Offset: %.3f", 
+               joint_index, goal_position, corrected_goal, it->second);
+  
+  return corrected_goal;
+}
+
+double DynamixelHardware::get_corrected_dynamixel_position(int joint_index)
+{
+  const char* log = nullptr;
+  
+  // Dynamixelの生のPresent_Positionを取得
+  int32_t dxl_raw_position;
+  if (!dynamixel_workbench_.itemRead(joint_ids_[joint_index], "Present_Position", &dxl_raw_position, &log)) {
+    RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), 
+                 "Failed to read Present_Position for joint %d: %s", joint_index, log);
+    return 0.0;
+  }
+  
+  double dynamixel_angle = dynamixel_workbench_.convertValue2Radian(joint_ids_[joint_index], dxl_raw_position) / mechanical_reductions_[joint_index];
+  
+  // オフセットが校正済みの場合、potential基準に変換
+  if (offsets_calibrated_ && external_types_[joint_index] == "potential") {
+    auto it = potential_offset_map_.find(joint_index);
+    if (it != potential_offset_map_.end()) {
+      return dynamixel_angle + it->second;  // potential基準に変換
+    }
+  }
+  
+  return dynamixel_angle;  // Dynamixel生値
+}
 
 }  // namespace dynamixel_hardware
 

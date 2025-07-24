@@ -121,6 +121,11 @@ private:
   void restore_multiturn_from_potential();
   int calculate_turn_offset(double true_angle, double single_turn_angle);
   
+  // Offset management for potential sensor joints
+  void calibrate_potential_offsets();
+  double apply_potential_offset(int joint_index, double goal_position);
+  double get_corrected_dynamixel_position(int joint_index);
+  
   // Service callbacks
   // void torque_enable_service_callback(
   //   const std::shared_ptr<std_srvs::srv::SetBool::Request> request,
@@ -139,6 +144,10 @@ private:
   bool use_dummy_{false};
   bool is_external_pos_{false};
   bool multiturn_restored_{false};
+  
+  // Offset management for potential sensor joints
+  std::map<int, double> potential_offset_map_;  // joint_index -> offset value
+  bool offsets_calibrated_{false};
   
   // Exponential Moving Average filter for ADC noise reduction
   struct EMAFilter {
