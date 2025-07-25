@@ -532,8 +532,11 @@ CallbackReturn DynamixelHardware::set_joint_positions()
                   joints_[i].command.position * 180.0 / M_PI, safe_command * 180.0 / M_PI);
     }
     
-    // potentialセンサージョイントの場合、オフセット補正を適用
-    double corrected_position = apply_potential_offset(i, safe_command);
+    // potentialセンサージョイントの場合のみ、オフセット補正を適用
+    double corrected_position = safe_command;
+    if (external_types_[i] == "potential") {
+      corrected_position = apply_potential_offset(i, safe_command);
+    }
     
     // 各サーボへ個別にGoal_Positionを送信
     int32_t goal_position = dynamixel_workbench_.convertRadian2Value(
