@@ -74,47 +74,78 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
   calibration_data_.resize(info_.joints.size(), CalibrationData());
   adc_filters_.resize(info_.joints.size(), EMAFilter(0.2));  // α=0.2 for moderate filtering
 
+  // Create ID-sorted index mapping to ensure joints are processed in ID order
+  std::vector<std::pair<int, size_t>> id_index_pairs;
+  for (size_t i = 0; i < info_.joints.size(); i++) {
+    int joint_id = std::stoi(info_.joints[i].parameters.at("id"));
+    id_index_pairs.push_back({joint_id, i});
+  }
+  std::sort(id_index_pairs.begin(), id_index_pairs.end());
+  
+  // Create sorted index mapping
+  id_sorted_indices_.resize(info_.joints.size());
+  for (size_t i = 0; i < id_index_pairs.size(); i++) {
+    id_sorted_indices_[i] = id_index_pairs[i].second;
+  }
+  
+  // Debug: Print original and sorted joint order
+  RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), "Original joint order from ros2_control:");
   for (uint i = 0; i < info_.joints.size(); i++) {
-    joint_ids_[i] = std::stoi(info_.joints[i].parameters.at("id"));
-    if (info_.joints[i].parameters.count("mechanical_reduction") > 0) {
-      mechanical_reductions_[i] = std::stof(info_.joints[i].parameters.at("mechanical_reduction"));
+    int joint_id = std::stoi(info_.joints[i].parameters.at("id"));
+    RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), "  [%u]: %s (ID: %d)", 
+                i, info_.joints[i].name.c_str(), joint_id);
+  }
+  
+  RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), "ID-sorted joint order:");
+  for (uint i = 0; i < info_.joints.size(); i++) {
+    size_t orig_idx = id_sorted_indices_[i];
+    int joint_id = std::stoi(info_.joints[orig_idx].parameters.at("id"));
+    RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), "  [%u]: %s (ID: %d)", 
+                i, info_.joints[orig_idx].name.c_str(), joint_id);
+  }
+
+  for (uint i = 0; i < info_.joints.size(); i++) {
+    size_t orig_idx = id_sorted_indices_[i];
+    joint_ids_[i] = std::stoi(info_.joints[orig_idx].parameters.at("id"));
+    if (info_.joints[orig_idx].parameters.count("mechanical_reduction") > 0) {
+      mechanical_reductions_[i] = std::stof(info_.joints[orig_idx].parameters.at("mechanical_reduction"));
     }
-    if (info_.joints[i].parameters.count("external_type") > 0) {
-      external_types_[i] = info_.joints[i].parameters.at("external_type");
+    if (info_.joints[orig_idx].parameters.count("external_type") > 0) {
+      external_types_[i] = info_.joints[orig_idx].parameters.at("external_type");
       calibration_data_[i].external_type = external_types_[i];
       
       // Load calibration parameters for potentiometer
       if (external_types_[i] == "potential") {
-        if (info_.joints[i].parameters.count("angle_min") > 0) {
-          calibration_data_[i].angle_min = std::stof(info_.joints[i].parameters.at("angle_min"));
+        if (info_.joints[orig_idx].parameters.count("angle_min") > 0) {
+          calibration_data_[i].angle_min = std::stof(info_.joints[orig_idx].parameters.at("angle_min"));
         }
-        if (info_.joints[i].parameters.count("adc_min") > 0) {
-          calibration_data_[i].adc_min = std::stof(info_.joints[i].parameters.at("adc_min"));
+        if (info_.joints[orig_idx].parameters.count("adc_min") > 0) {
+          calibration_data_[i].adc_min = std::stof(info_.joints[orig_idx].parameters.at("adc_min"));
         }
-        if (info_.joints[i].parameters.count("angle_max") > 0) {
-          calibration_data_[i].angle_max = std::stof(info_.joints[i].parameters.at("angle_max"));
+        if (info_.joints[orig_idx].parameters.count("angle_max") > 0) {
+          calibration_data_[i].angle_max = std::stof(info_.joints[orig_idx].parameters.at("angle_max"));
         }
-        if (info_.joints[i].parameters.count("adc_max") > 0) {
-          calibration_data_[i].adc_max = std::stof(info_.joints[i].parameters.at("adc_max"));
+        if (info_.joints[orig_idx].parameters.count("adc_max") > 0) {
+          calibration_data_[i].adc_max = std::stof(info_.joints[orig_idx].parameters.at("adc_max"));
         }
       }
       
       // Load calibration parameters for dual limit
       if (external_types_[i] == "dual_limit") {
-        if (info_.joints[i].parameters.count("high_limit") > 0) {
-          calibration_data_[i].high_limit = std::stof(info_.joints[i].parameters.at("high_limit"));
+        if (info_.joints[orig_idx].parameters.count("high_limit") > 0) {
+          calibration_data_[i].high_limit = std::stof(info_.joints[orig_idx].parameters.at("high_limit"));
         }
-        if (info_.joints[i].parameters.count("low_limit") > 0) {
-          calibration_data_[i].low_limit = std::stof(info_.joints[i].parameters.at("low_limit"));
+        if (info_.joints[orig_idx].parameters.count("low_limit") > 0) {
+          calibration_data_[i].low_limit = std::stof(info_.joints[orig_idx].parameters.at("low_limit"));
         }
-        if (info_.joints[i].parameters.count("external_io_high") > 0) {
-          calibration_data_[i].external_io_high = std::stoi(info_.joints[i].parameters.at("external_io_high"));
+        if (info_.joints[orig_idx].parameters.count("external_io_high") > 0) {
+          calibration_data_[i].external_io_high = std::stoi(info_.joints[orig_idx].parameters.at("external_io_high"));
         }
-        if (info_.joints[i].parameters.count("external_io_low") > 0) {
-          calibration_data_[i].external_io_low = std::stoi(info_.joints[i].parameters.at("external_io_low"));
+        if (info_.joints[orig_idx].parameters.count("external_io_low") > 0) {
+          calibration_data_[i].external_io_low = std::stoi(info_.joints[orig_idx].parameters.at("external_io_low"));
         }
-        if (info_.joints[i].parameters.count("safety_margin") > 0) {
-          calibration_data_[i].safety_margin = std::stof(info_.joints[i].parameters.at("safety_margin"));
+        if (info_.joints[orig_idx].parameters.count("safety_margin") > 0) {
+          calibration_data_[i].safety_margin = std::stof(info_.joints[orig_idx].parameters.at("safety_margin"));
         }
       }
     }
@@ -238,17 +269,40 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
 std::vector<hardware_interface::StateInterface> DynamixelHardware::export_state_interfaces()
 {
   RCLCPP_DEBUG(rclcpp::get_logger(kDynamixelHardware), "export_state_interfaces");
-  std::vector<hardware_interface::StateInterface> state_interfaces;
+  
+  // Debug: Print URDF joint order
+  RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), "State interface export order (URDF order):");
   for (uint i = 0; i < info_.joints.size(); i++) {
+    RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), "  [%u]: %s", 
+                i, info_.joints[i].name.c_str());
+  }
+  
+  std::vector<hardware_interface::StateInterface> state_interfaces;
+  // 元の順序（URDF順）でエクスポート、データはID順配列から取得
+  for (uint i = 0; i < info_.joints.size(); i++) {
+    // info_.joints[i]から関節IDを取得し、対応するデータ配列のインデックスを見つける
+    int joint_id = std::stoi(info_.joints[i].parameters.at("id"));
+    size_t data_idx = 0;
+    for (size_t j = 0; j < joint_ids_.size(); j++) {
+      if (joint_ids_[j] == joint_id) {
+        data_idx = j;
+        break;
+      }
+    }
+
+    for (size_t it = 0; it < joint_ids_.size(); ++it) {
+      RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), "joint_ids_[%zu] = %d", it, joint_ids_[it]);
+    }
+    
     state_interfaces.emplace_back(
       hardware_interface::StateInterface(
-        info_.joints[i].name, hardware_interface::HW_IF_POSITION, &joints_[i].state.position));
+        info_.joints[i].name, hardware_interface::HW_IF_POSITION, &joints_[data_idx].state.position));
     state_interfaces.emplace_back(
       hardware_interface::StateInterface(
-        info_.joints[i].name, hardware_interface::HW_IF_VELOCITY, &joints_[i].state.velocity));
+        info_.joints[i].name, hardware_interface::HW_IF_VELOCITY, &joints_[data_idx].state.velocity));
     state_interfaces.emplace_back(
       hardware_interface::StateInterface(
-        info_.joints[i].name, hardware_interface::HW_IF_EFFORT, &joints_[i].state.effort));
+        info_.joints[i].name, hardware_interface::HW_IF_EFFORT, &joints_[data_idx].state.effort));
   }
 
   return state_interfaces;
@@ -258,13 +312,24 @@ std::vector<hardware_interface::CommandInterface> DynamixelHardware::export_comm
 {
   RCLCPP_DEBUG(rclcpp::get_logger(kDynamixelHardware), "export_command_interfaces");
   std::vector<hardware_interface::CommandInterface> command_interfaces;
+  // 元の順序（URDF順）でエクスポート、データはID順配列から取得
   for (uint i = 0; i < info_.joints.size(); i++) {
+    // info_.joints[i]から関節IDを取得し、対応するデータ配列のインデックスを見つける
+    int joint_id = std::stoi(info_.joints[i].parameters.at("id"));
+    size_t data_idx = 0;
+    for (size_t j = 0; j < joint_ids_.size(); j++) {
+      if (joint_ids_[j] == joint_id) {
+        data_idx = j;
+        break;
+      }
+    }
+    
     command_interfaces.emplace_back(
       hardware_interface::CommandInterface(
-        info_.joints[i].name, hardware_interface::HW_IF_POSITION, &joints_[i].command.position));
+        info_.joints[i].name, hardware_interface::HW_IF_POSITION, &joints_[data_idx].command.position));
     command_interfaces.emplace_back(
       hardware_interface::CommandInterface(
-        info_.joints[i].name, hardware_interface::HW_IF_VELOCITY, &joints_[i].command.velocity));
+        info_.joints[i].name, hardware_interface::HW_IF_VELOCITY, &joints_[data_idx].command.velocity));
   }
 
   return command_interfaces;
@@ -321,8 +386,17 @@ return_type DynamixelHardware::read(
 
   const char * log = nullptr;
   std::vector<int32_t> external_positions(info_.joints.size(), 0);
+  static auto last_read_time = std::chrono::steady_clock::now();
+  
+  // Read頻度制限: 5ms間隔（Writeより短く設定して位置フィードバックを重視）
+  auto current_time = std::chrono::steady_clock::now();
+  auto time_diff = std::chrono::duration_cast<std::chrono::milliseconds>(current_time - last_read_time);
+  
+  if (time_diff.count() < 5) {
+    return return_type::OK;  // スキップして高速化
+  }
 
-  // 個別Read方式に変更 - 異なる型番のサーボ(PH42/PM54/XM540)に対応
+  // 個別Read方式（混在モータ対応）- バッファリング済み
   for (uint i = 0; i < info_.joints.size(); i++) {
     int32_t position = 0;
     int32_t current = 0;
@@ -346,6 +420,8 @@ return_type DynamixelHardware::read(
     joints_[i].state.position = dynamixel_workbench_.convertValue2Radian(joint_ids_[i], position) / mechanical_reductions_[i];
     joints_[i].state.effort = dynamixel_workbench_.convertValue2Current(current) / mechanical_reductions_[i];
   }
+  
+  last_read_time = current_time;
 
   // External position handling (if enabled)
   if (is_external_pos_) {
@@ -518,8 +594,29 @@ return_type DynamixelHardware::reset_command()
 CallbackReturn DynamixelHardware::set_joint_positions()
 {
   const char * log = nullptr;
+  static auto last_write_time = std::chrono::steady_clock::now();
+  static std::vector<double> last_positions(info_.joints.size(), 0.0);
+  
+  // バッファリング制御: 10ms間隔または大きな変化がある場合のみ送信
+  auto current_time = std::chrono::steady_clock::now();
+  auto time_diff = std::chrono::duration_cast<std::chrono::milliseconds>(current_time - last_write_time);
+  
+  bool should_write = (time_diff.count() >= 10);  // 最低10ms間隔
+  if (!should_write) {
+    // 位置変化が大きい場合は即座に送信
+    for (uint i = 0; i < info_.joints.size(); i++) {
+      if (std::abs(joints_[i].command.position - last_positions[i]) > 0.01) {  // 0.01rad = 0.57deg
+        should_write = true;
+        break;
+      }
+    }
+  }
+  
+  if (!should_write) {
+    return CallbackReturn::SUCCESS;  // スキップして高速化
+  }
 
-  // 個別Write方式に変更 - 異なる型番のサーボ(PH42/PM54/XM540)に対応
+  // 個別Write方式（混在モータ対応）
   for (uint i = 0; i < info_.joints.size(); i++) {
     joints_[i].prev_command.position = joints_[i].command.position;
     
@@ -545,7 +642,11 @@ CallbackReturn DynamixelHardware::set_joint_positions()
     if (!dynamixel_workbench_.itemWrite(joint_ids_[i], kGoalPositionItem, goal_position, &log)) {
       RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "ID %d goal position write failed: %s", joint_ids_[i], log);
     }
+    
+    last_positions[i] = joints_[i].command.position;
   }
+  
+  last_write_time = current_time;
   return CallbackReturn::SUCCESS;
 }
 

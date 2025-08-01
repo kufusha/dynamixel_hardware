@@ -155,6 +155,7 @@ private:
   bool use_dummy_{false};
   bool is_external_pos_{false};
   bool multiturn_restored_{false};
+  std::vector<size_t> id_sorted_indices_;  // Mapping from ID-sorted order to original order
   
   // Offset management for potential sensor joints
   std::map<int, double> potential_offset_map_;  // joint_index -> offset value
