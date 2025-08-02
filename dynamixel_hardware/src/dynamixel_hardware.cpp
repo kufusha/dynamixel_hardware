@@ -311,29 +311,35 @@ return_type DynamixelHardware::write(
     return return_type::OK;
   }
 
-  // Velocity control
+  // Velocity control (rarely used in MoveIt Servo)
   if (std::any_of(
       joints_.cbegin(), joints_.cend(), [](auto j) {
         return j.command.velocity != j.prev_command.velocity;
       }))
   {
-    set_control_mode(ControlMode::Velocity);
-    if (mode_changed_) {
-      set_joint_params();
+    // 制御モード変更が必要な場合のみ実行
+    if (control_mode_ != ControlMode::Velocity) {
+      set_control_mode(ControlMode::Velocity);
+      if (mode_changed_) {
+        set_joint_params();
+      }
     }
     set_joint_velocities();
     return return_type::OK;
   }
 
-  // Position control
+  // Position control (optimized for MoveIt Servo)
   if (std::any_of(
       joints_.cbegin(), joints_.cend(), [](auto j) {
         return j.command.position != j.prev_command.position;
       }))
   {
-    set_control_mode(ControlMode::Position);
-    if (mode_changed_) {
-      set_joint_params();
+    // 初回のみ制御モード設定（MoveIt Servoは常にPosition制御）
+    if (control_mode_ != ControlMode::Position) {
+      set_control_mode(ControlMode::Position);
+      if (mode_changed_) {
+        set_joint_params();
+      }
     }
     set_joint_positions();
     return return_type::OK;
