@@ -213,6 +213,22 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
     return CallbackReturn::ERROR;
   }
 
+  // SyncWriteハンドラー作成（Goal_Position用）
+  const ControlItem * p_series_goal = dynamixel_workbench_.getItemInfo(joint_ids_[0], kGoalPositionItem);
+  const ControlItem * x_series_goal = dynamixel_workbench_.getItemInfo(joint_ids_[2], kGoalPositionItem);
+  
+  if (p_series_goal && !dynamixel_workbench_.addSyncWriteHandler(
+      p_series_goal->address, p_series_goal->data_length, &log)) {
+    RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "P-series SyncWrite handler failed: %s", log);
+    return CallbackReturn::ERROR;
+  }
+  
+  if (x_series_goal && !dynamixel_workbench_.addSyncWriteHandler(
+      x_series_goal->address, x_series_goal->data_length, &log)) {
+    RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "X-series SyncWrite handler failed: %s", log);
+    return CallbackReturn::ERROR;
+  }
+
   return CallbackReturn::SUCCESS;
 }
 
@@ -507,24 +523,30 @@ return_type DynamixelHardware::reset_command()
 
 CallbackReturn DynamixelHardware::set_joint_positions()
 {
-  static uint32_t write_error_count = 0;
-  static const uint32_t ERROR_LOG_INTERVAL = 200;
-  const char * log = nullptr;
+  static const char * log = nullptr;
+  static uint8_t p_series_ids[2] = {1, 2};
+  static uint8_t x_series_ids[4] = {3, 4, 5, 6};
+  static int32_t commands[6];
   
-  // 最小限の位置書き込みのみ（安全チェック・オフセット補正は省略）
-  for (uint i = 0; i < info_.joints.size(); i++) {
-    joints_[i].prev_command.position = joints_[i].command.position;
-    
-    // 高速化: floatキャストと乗算を一度に実行
-    int32_t goal_position = dynamixel_workbench_.convertRadian2Value(
-      joint_ids_[i], static_cast<float>(joints_[i].command.position * mechanical_reductions_[i]));
-    
-    if (!dynamixel_workbench_.itemWrite(joint_ids_[i], kGoalPositionItem, goal_position, &log)) {
-      if (++write_error_count % ERROR_LOG_INTERVAL == 0) {
-        RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "Write failed %u times", write_error_count);
-      }
-    }
-  }
+  // prev_command更新（ループ展開）
+  joints_[0].prev_command.position = joints_[0].command.position;
+  joints_[1].prev_command.position = joints_[1].command.position;
+  joints_[2].prev_command.position = joints_[2].command.position;
+  joints_[3].prev_command.position = joints_[3].command.position;
+  joints_[4].prev_command.position = joints_[4].command.position;
+  joints_[5].prev_command.position = joints_[5].command.position;
+  
+  // 目標位置計算（ループ展開）
+  commands[0] = dynamixel_workbench_.convertRadian2Value(1, static_cast<float>(joints_[0].command.position * mechanical_reductions_[0]));
+  commands[1] = dynamixel_workbench_.convertRadian2Value(2, static_cast<float>(joints_[1].command.position * mechanical_reductions_[1]));
+  commands[2] = dynamixel_workbench_.convertRadian2Value(3, static_cast<float>(joints_[2].command.position * mechanical_reductions_[2]));
+  commands[3] = dynamixel_workbench_.convertRadian2Value(4, static_cast<float>(joints_[3].command.position * mechanical_reductions_[3]));
+  commands[4] = dynamixel_workbench_.convertRadian2Value(5, static_cast<float>(joints_[4].command.position * mechanical_reductions_[4]));
+  commands[5] = dynamixel_workbench_.convertRadian2Value(6, static_cast<float>(joints_[5].command.position * mechanical_reductions_[5]));
+  
+  // SyncWrite実行（2グループ）
+  dynamixel_workbench_.syncWrite(0, p_series_ids, 2, &commands[0], 1, &log);  // P-series (ID1-2)
+  dynamixel_workbench_.syncWrite(1, x_series_ids, 4, &commands[2], 1, &log);  // X-series (ID3-6)
   
   return CallbackReturn::SUCCESS;
 }
