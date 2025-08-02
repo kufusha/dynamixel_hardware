@@ -323,8 +323,8 @@ return_type DynamixelHardware::read(
   // 超高速化: static配列とループ最適化
   static const char * log = nullptr;
   static int32_t positions[6] = {0};
-  static const uint8_t p_series_ids[2] = {1, 2};  // ID固定
-  static const uint8_t x_series_ids[4] = {3, 4, 5, 6};  // ID固定
+  static uint8_t p_series_ids[2] = {1, 2};  // ID固定（constを削除）
+  static uint8_t x_series_ids[4] = {3, 4, 5, 6};  // ID固定（constを削除）
   
   // SyncRead実行（最小限）
   dynamixel_workbench_.syncRead(0, p_series_ids, 2, &log);
@@ -676,7 +676,7 @@ void DynamixelHardware::restore_multiturn_from_potential()
     return;
   }
   
-  const char* log = nullptr;
+  // const char* log = nullptr;  // unused variable削除
   
   
   // Mark multiturn restoration as completed
