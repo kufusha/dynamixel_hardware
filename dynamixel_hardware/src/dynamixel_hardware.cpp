@@ -35,6 +35,7 @@ constexpr uint8_t kExternalPortIndex = 1;
 constexpr const char * kGoalPositionItem = "Goal_Position";
 constexpr const char * kGoalVelocityItem = "Goal_Velocity";
 constexpr const char * kPresentPositionItem = "Present_Position";
+constexpr const char * kPresentVelocityItem = "Present_Velocity";
 constexpr const char * kPresentCurrentItem = "Present_Current";
 constexpr const char * kPresentLoadItem = "Present_Load";
 constexpr const char * kExternalPortItem = "External_Port_Data_1";
@@ -50,7 +51,6 @@ constexpr const char * const kExtraJointParameters[] = {
 
 CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo & info)
 {
-  RCLCPP_DEBUG(rclcpp::get_logger(kDynamixelHardware), "configure");
   if (hardware_interface::SystemInterface::on_init(info) != CallbackReturn::SUCCESS) {
     return CallbackReturn::ERROR;
   }
@@ -89,20 +89,6 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
   }
   
   // Debug: Print original and sorted joint order
-  RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), "Original joint order from ros2_control:");
-  for (uint i = 0; i < info_.joints.size(); i++) {
-    int joint_id = std::stoi(info_.joints[i].parameters.at("id"));
-    RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), "  [%u]: %s (ID: %d)", 
-                i, info_.joints[i].name.c_str(), joint_id);
-  }
-  
-  RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), "ID-sorted joint order:");
-  for (uint i = 0; i < info_.joints.size(); i++) {
-    size_t orig_idx = id_sorted_indices_[i];
-    int joint_id = std::stoi(info_.joints[orig_idx].parameters.at("id"));
-    RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), "  [%u]: %s (ID: %d)", 
-                i, info_.joints[orig_idx].name.c_str(), joint_id);
-  }
 
   for (uint i = 0; i < info_.joints.size(); i++) {
     size_t orig_idx = id_sorted_indices_[i];
@@ -155,8 +141,6 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
     joints_[i].command.effort = std::numeric_limits<double>::quiet_NaN();
     joints_[i].prev_command.position = joints_[i].command.position;
     joints_[i].prev_command.effort = joints_[i].command.effort;
-    RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), "joint_id %d: %d, external_type: %s", 
-                i, joint_ids_[i], external_types_[i].c_str());
   }
 
   if (
@@ -180,8 +164,6 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
   auto baud_rate = std::stoi(info_.hardware_parameters.at("baud_rate"));
   const char * log = nullptr;
 
-  RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), "usb_port: %s", usb_port.c_str());
-  RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), "baud_rate: %d", baud_rate);
 
   if (!dynamixel_workbench_.init(usb_port.c_str(), baud_rate, &log)) {
     RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "%s", log);
@@ -200,82 +182,74 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
   set_operating_modes();  // Extended Position Control設定 (先に実行)
   set_joint_params();
 
-  const ControlItem * goal_position =
-    dynamixel_workbench_.getItemInfo(joint_ids_[0], kGoalPositionItem);
-  if (goal_position == nullptr) {
-    return CallbackReturn::ERROR;
-  }
+  // 個別読み取り・書き込み方式のため、ControlItem取得・SyncWriteハンドラーは不要（コメントアウト）
+  // const ControlItem * goal_position =
+  //   dynamixel_workbench_.getItemInfo(joint_ids_[0], kGoalPositionItem);
+  // if (goal_position == nullptr) {
+  //   return CallbackReturn::ERROR;
+  // }
+
+  // const ControlItem * present_position =
+  //   dynamixel_workbench_.getItemInfo(joint_ids_[0], kPresentPositionItem);
+  // if (present_position == nullptr) {
+  //   return CallbackReturn::ERROR;
+  // }
+
+  // const ControlItem * present_current =
+  //   dynamixel_workbench_.getItemInfo(joint_ids_[0], kPresentCurrentItem);
+  // if (present_current == nullptr) {
+  //   present_current = dynamixel_workbench_.getItemInfo(joint_ids_[0], kPresentLoadItem);
+  // }
+  // if (present_current == nullptr) {
+  //   return CallbackReturn::ERROR;
+  // }
+
+  // control_items_[kGoalPositionItem] = goal_position;
+  // control_items_[kPresentPositionItem] = present_position;
+  // control_items_[kPresentCurrentItem] = present_current;
+
+  // if (is_external_pos_) {
+  //   const ControlItem * external_port =
+  //     dynamixel_workbench_.getItemInfo(joint_ids_[0], kExternalPortItem);
+  //   if (external_port == nullptr) {
+  //     RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "External_Port_Data_1 not found");
+  //     return CallbackReturn::ERROR;
+  //   }
+  //   control_items_[kExternalPortItem] = external_port;
+  // }
+
+  // if (!dynamixel_workbench_.addSyncWriteHandler(
+  //     control_items_[kGoalPositionItem]->address, control_items_[kGoalPositionItem]->data_length,
+  //     &log))
+  // {
+  //   RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "%s", log);
+  //   return CallbackReturn::ERROR;
+  // }
 
 
-  const ControlItem * present_position =
-    dynamixel_workbench_.getItemInfo(joint_ids_[0], kPresentPositionItem);
-  if (present_position == nullptr) {
-    return CallbackReturn::ERROR;
-  }
+  // 個別読み取り方式のためSyncReadハンドラーは不要（コメントアウト）
+  // uint16_t start_address = std::min(
+  //   control_items_[kPresentPositionItem]->address, control_items_[kPresentCurrentItem]->address);
+  // uint16_t read_length = control_items_[kPresentPositionItem]->data_length +
+  //   control_items_[kPresentCurrentItem]->data_length + 2;
+  // if (!dynamixel_workbench_.addSyncReadHandler(start_address, read_length, &log)) {
+  //   RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "%s", log);
+  //   return CallbackReturn::ERROR;
+  // }
 
-
-  const ControlItem * present_current =
-    dynamixel_workbench_.getItemInfo(joint_ids_[0], kPresentCurrentItem);
-  if (present_current == nullptr) {
-    present_current = dynamixel_workbench_.getItemInfo(joint_ids_[0], kPresentLoadItem);
-  }
-  if (present_current == nullptr) {
-    return CallbackReturn::ERROR;
-  }
-
-  control_items_[kGoalPositionItem] = goal_position;
-  control_items_[kPresentPositionItem] = present_position;
-  control_items_[kPresentCurrentItem] = present_current;
-
-  if (is_external_pos_) {
-    const ControlItem * external_port =
-      dynamixel_workbench_.getItemInfo(joint_ids_[0], kExternalPortItem);
-    if (external_port == nullptr) {
-      RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "External_Port_Data_1 not found");
-      return CallbackReturn::ERROR;
-    }
-    control_items_[kExternalPortItem] = external_port;
-  }
-
-  if (!dynamixel_workbench_.addSyncWriteHandler(
-      control_items_[kGoalPositionItem]->address, control_items_[kGoalPositionItem]->data_length,
-      &log))
-  {
-    RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "%s", log);
-    return CallbackReturn::ERROR;
-  }
-
-
-  uint16_t start_address = std::min(
-    control_items_[kPresentPositionItem]->address, control_items_[kPresentCurrentItem]->address);
-  uint16_t read_length = control_items_[kPresentPositionItem]->data_length +
-    control_items_[kPresentCurrentItem]->data_length + 2;
-  if (!dynamixel_workbench_.addSyncReadHandler(start_address, read_length, &log)) {
-    RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "%s", log);
-    return CallbackReturn::ERROR;
-  }
-
-  if (is_external_pos_) {
-    if (!dynamixel_workbench_.addSyncReadHandler(
-        control_items_[kExternalPortItem]->address, control_items_[kExternalPortItem]->data_length, &log)) {
-      RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "%s", log);
-      return CallbackReturn::ERROR;
-    }
-  }
+  // if (is_external_pos_) {
+  //   if (!dynamixel_workbench_.addSyncReadHandler(
+  //       control_items_[kExternalPortItem]->address, control_items_[kExternalPortItem]->data_length, &log)) {
+  //     RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "%s", log);
+  //     return CallbackReturn::ERROR;
+  //   }
+  // }
 
   return CallbackReturn::SUCCESS;
 }
 
 std::vector<hardware_interface::StateInterface> DynamixelHardware::export_state_interfaces()
 {
-  RCLCPP_DEBUG(rclcpp::get_logger(kDynamixelHardware), "export_state_interfaces");
-  
-  // Debug: Print URDF joint order
-  RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), "State interface export order (URDF order):");
-  for (uint i = 0; i < info_.joints.size(); i++) {
-    RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), "  [%u]: %s", 
-                i, info_.joints[i].name.c_str());
-  }
   
   std::vector<hardware_interface::StateInterface> state_interfaces;
   // 元の順序（URDF順）でエクスポート、データはID順配列から取得
@@ -290,9 +264,6 @@ std::vector<hardware_interface::StateInterface> DynamixelHardware::export_state_
       }
     }
 
-    for (size_t it = 0; it < joint_ids_.size(); ++it) {
-      RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), "joint_ids_[%zu] = %d", it, joint_ids_[it]);
-    }
     
     state_interfaces.emplace_back(
       hardware_interface::StateInterface(
@@ -310,7 +281,6 @@ std::vector<hardware_interface::StateInterface> DynamixelHardware::export_state_
 
 std::vector<hardware_interface::CommandInterface> DynamixelHardware::export_command_interfaces()
 {
-  RCLCPP_DEBUG(rclcpp::get_logger(kDynamixelHardware), "export_command_interfaces");
   std::vector<hardware_interface::CommandInterface> command_interfaces;
   // 元の順序（URDF順）でエクスポート、データはID順配列から取得
   for (uint i = 0; i < info_.joints.size(); i++) {
@@ -337,7 +307,6 @@ std::vector<hardware_interface::CommandInterface> DynamixelHardware::export_comm
 
 CallbackReturn DynamixelHardware::on_configure(const rclcpp_lifecycle::State & /* previous_state */)
 {
-  RCLCPP_DEBUG(rclcpp::get_logger(kDynamixelHardware), "start");
   for (uint i = 0; i < joints_.size(); i++) {
     if (use_dummy_ && std::isnan(joints_[i].state.position)) {
       joints_[i].state.position = 0.0;
@@ -372,7 +341,6 @@ CallbackReturn DynamixelHardware::on_configure(const rclcpp_lifecycle::State & /
 CallbackReturn DynamixelHardware::on_deactivate(
   const rclcpp_lifecycle::State & /* previous_state */)
 {
-  RCLCPP_DEBUG(rclcpp::get_logger(kDynamixelHardware), "stop");
   return CallbackReturn::SUCCESS;
 }
 
@@ -384,75 +352,32 @@ return_type DynamixelHardware::read(
     return return_type::OK;
   }
 
+  static uint32_t error_count = 0;
+  static const uint32_t ERROR_LOG_INTERVAL = 200;
   const char * log = nullptr;
-  std::vector<int32_t> external_positions(info_.joints.size(), 0);
-  static auto last_read_time = std::chrono::steady_clock::now();
   
-  // Read頻度制限: 5ms間隔（Writeより短く設定して位置フィードバックを重視）
-  auto current_time = std::chrono::steady_clock::now();
-  auto time_diff = std::chrono::duration_cast<std::chrono::milliseconds>(current_time - last_read_time);
-  
-  if (time_diff.count() < 5) {
-    return return_type::OK;  // スキップして高速化
-  }
-
-  // 個別Read方式（混在モータ対応）- バッファリング済み
+  // 各サーボから個別に位置のみ読み取り（混在サーボ対応・軽量化）
   for (uint i = 0; i < info_.joints.size(); i++) {
     int32_t position = 0;
-    int32_t current = 0;
     
-    // 各サーボから個別に位置情報を読み取り
     if (!dynamixel_workbench_.itemRead(joint_ids_[i], kPresentPositionItem, &position, &log)) {
-      RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "ID %d position read failed: %s", joint_ids_[i], log);
+      if (++error_count % ERROR_LOG_INTERVAL == 0) {
+        RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "Position read failed %u times", error_count);
+      }
       continue;
     }
     
-    // 各サーボから個別に電流情報を読み取り
-    if (!dynamixel_workbench_.itemRead(joint_ids_[i], kPresentCurrentItem, &current, &log)) {
-      // Present_Currentが無い場合はPresent_Loadを試行
-      if (!dynamixel_workbench_.itemRead(joint_ids_[i], kPresentLoadItem, &current, &log)) {
-        RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "ID %d current/load read failed: %s", joint_ids_[i], log);
-        current = 0;
-      }
-    }
+    // 位置制御では速度読み取りは不要（軽量化のためコメントアウト）
+    // int32_t velocity = 0;
+    // if (!dynamixel_workbench_.itemRead(joint_ids_[i], kPresentVelocityItem, &velocity, &log)) {
+    //   velocity = 0;
+    // }
     
-    // 位置と電流値を設定
-    joints_[i].state.position = dynamixel_workbench_.convertValue2Radian(joint_ids_[i], position) / mechanical_reductions_[i];
-    joints_[i].state.effort = dynamixel_workbench_.convertValue2Current(current) / mechanical_reductions_[i];
-  }
-  
-  last_read_time = current_time;
-
-  // External position handling (if enabled)
-  if (is_external_pos_) {
-    for (uint i = 0; i < info_.joints.size(); i++) {
-      int32_t external_data = 0;
-      if (!dynamixel_workbench_.itemRead(joint_ids_[i], kExternalPortItem, &external_data, &log)) {
-        RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "ID %d external port read failed: %s", joint_ids_[i], log);
-        external_data = 0;
-      }
-      
-      // Apply EMA filter for potentiometer joints to reduce noise
-      if (external_types_[i] == "potential") {
-        external_data = static_cast<int32_t>(adc_filters_[i].update(static_cast<double>(external_data)));
-      }
-      
-      external_positions[i] = external_data;
-    }
-
-    // Apply external position logic
-    for (uint i = 0; i < info_.joints.size(); i++) {
-      // Use external sensor for position based on configuration
-      if (is_external_pos_ && external_types_[i] == "potential") {
-        // Use external potentiometer reading with calibration
-        joints_[i].state.position = convert_external_sensor_to_angle(i, external_positions[i]);
-      }
-      // For joints without external sensors (external_type != "potential"), 
-      // keep using Dynamixel internal position (already set above)
-    }
-    
-    // Hybrid offset management - monitor and update offsets dynamically
-    smart_offset_management();
+    // 高速化: 除算を乗算に変更
+    const double inv_reduction = 1.0 / mechanical_reductions_[i];
+    joints_[i].state.position = dynamixel_workbench_.convertValue2Radian(joint_ids_[i], position) * inv_reduction;
+    joints_[i].state.velocity = 0.0;  // 位置制御では速度フィードバック不要
+    joints_[i].state.effort = 0.0;
   }
 
   return return_type::OK;
@@ -593,60 +518,25 @@ return_type DynamixelHardware::reset_command()
 
 CallbackReturn DynamixelHardware::set_joint_positions()
 {
+  static uint32_t write_error_count = 0;
+  static const uint32_t ERROR_LOG_INTERVAL = 200;
   const char * log = nullptr;
-  static auto last_write_time = std::chrono::steady_clock::now();
-  static std::vector<double> last_positions(info_.joints.size(), 0.0);
   
-  // バッファリング制御: 10ms間隔または大きな変化がある場合のみ送信
-  auto current_time = std::chrono::steady_clock::now();
-  auto time_diff = std::chrono::duration_cast<std::chrono::milliseconds>(current_time - last_write_time);
-  
-  bool should_write = (time_diff.count() >= 10);  // 最低10ms間隔
-  if (!should_write) {
-    // 位置変化が大きい場合は即座に送信
-    for (uint i = 0; i < info_.joints.size(); i++) {
-      if (std::abs(joints_[i].command.position - last_positions[i]) > 0.01) {  // 0.01rad = 0.57deg
-        should_write = true;
-        break;
+  // 最小限の位置書き込みのみ（安全チェック・オフセット補正は省略）
+  for (uint i = 0; i < info_.joints.size(); i++) {
+    joints_[i].prev_command.position = joints_[i].command.position;
+    
+    // 高速化: floatキャストと乗算を一度に実行
+    int32_t goal_position = dynamixel_workbench_.convertRadian2Value(
+      joint_ids_[i], static_cast<float>(joints_[i].command.position * mechanical_reductions_[i]));
+    
+    if (!dynamixel_workbench_.itemWrite(joint_ids_[i], kGoalPositionItem, goal_position, &log)) {
+      if (++write_error_count % ERROR_LOG_INTERVAL == 0) {
+        RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "Write failed %u times", write_error_count);
       }
     }
   }
   
-  if (!should_write) {
-    return CallbackReturn::SUCCESS;  // スキップして高速化
-  }
-
-  // 個別Write方式（混在モータ対応）
-  for (uint i = 0; i < info_.joints.size(); i++) {
-    joints_[i].prev_command.position = joints_[i].command.position;
-    
-    // 安全範囲チェック
-    double safe_command = clamp_to_safe_range(i, joints_[i].command.position);
-    if (std::abs(safe_command - joints_[i].command.position) > 0.01) {
-      RCLCPP_WARN(rclcpp::get_logger(kDynamixelHardware), 
-                  "Joint %d command clamped: %.3f -> %.3f rad (%.1f -> %.1f deg)",
-                  i, joints_[i].command.position, safe_command,
-                  joints_[i].command.position * 180.0 / M_PI, safe_command * 180.0 / M_PI);
-    }
-    
-    // potentialセンサージョイントの場合のみ、オフセット補正を適用
-    double corrected_position = safe_command;
-    if (external_types_[i] == "potential") {
-      corrected_position = apply_potential_offset(i, safe_command);
-    }
-    
-    // 各サーボへ個別にGoal_Positionを送信
-    int32_t goal_position = dynamixel_workbench_.convertRadian2Value(
-      joint_ids_[i], static_cast<float>(corrected_position) * mechanical_reductions_[i]);
-    
-    if (!dynamixel_workbench_.itemWrite(joint_ids_[i], kGoalPositionItem, goal_position, &log)) {
-      RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "ID %d goal position write failed: %s", joint_ids_[i], log);
-    }
-    
-    last_positions[i] = joints_[i].command.position;
-  }
-  
-  last_write_time = current_time;
   return CallbackReturn::SUCCESS;
 }
 
@@ -673,18 +563,20 @@ CallbackReturn DynamixelHardware::set_joint_params()
 
 CallbackReturn DynamixelHardware::set_joint_velocities()
 {
+  static uint32_t vel_error_count = 0;
+  static const uint32_t ERROR_LOG_INTERVAL = 200;
   const char * log = nullptr;
 
-  // 個別Write方式に変更 - 異なる型番のサーボ(PH42/PM54/XM540)に対応
   for (uint i = 0; i < info_.joints.size(); i++) {
     joints_[i].prev_command.velocity = joints_[i].command.velocity;
     
-    // 各サーボへ個別にGoal_Velocityを送信
     int32_t goal_velocity = dynamixel_workbench_.convertVelocity2Value(
-      joint_ids_[i], static_cast<float>(joints_[i].command.velocity) * mechanical_reductions_[i]);
+      joint_ids_[i], static_cast<float>(joints_[i].command.velocity * mechanical_reductions_[i]));
     
     if (!dynamixel_workbench_.itemWrite(joint_ids_[i], kGoalVelocityItem, goal_velocity, &log)) {
-      RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "ID %d goal velocity write failed: %s", joint_ids_[i], log);
+      if (++vel_error_count % ERROR_LOG_INTERVAL == 0) {
+        RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "Velocity write failed %u times", vel_error_count);
+      }
     }
   }
   return CallbackReturn::SUCCESS;
