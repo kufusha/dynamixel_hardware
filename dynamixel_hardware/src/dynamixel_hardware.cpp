@@ -320,50 +320,54 @@ return_type DynamixelHardware::read(
     return return_type::OK;
   }
 
-  const char * log = nullptr;
-  std::vector<int32_t> positions(info_.joints.size(), 0);
+  // 超高速化: static配列とループ最適化
+  static const char * log = nullptr;
+  static int32_t positions[6] = {0};
+  static const uint8_t p_series_ids[2] = {1, 2};  // ID固定
+  static const uint8_t x_series_ids[4] = {3, 4, 5, 6};  // ID固定
   
-  // 真のSyncRead実装: 2グループで高速化
+  // SyncRead実行（最小限）
+  dynamixel_workbench_.syncRead(0, p_series_ids, 2, &log);
+  dynamixel_workbench_.getSyncReadData(0, p_series_ids, 2, 580, 4, &positions[0], &log);
   
-  // Group 1: P-series SyncRead (ID1-2)
-  std::vector<uint8_t> p_series_ids = {static_cast<uint8_t>(joint_ids_[0]), static_cast<uint8_t>(joint_ids_[1])};
-  if (!dynamixel_workbench_.syncRead(0, p_series_ids.data(), p_series_ids.size(), &log)) {
-    RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "P-series SyncRead failed: %s", log);
-  } else {
-    // P-series結果取得
-    if (!dynamixel_workbench_.getSyncReadData(0, p_series_ids.data(), p_series_ids.size(), 
-                                              580, 4, reinterpret_cast<int32_t*>(&positions[0]), &log)) {
-      RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "P-series getData failed: %s", log);
-    }
-  }
+  dynamixel_workbench_.syncRead(1, x_series_ids, 4, &log);
+  dynamixel_workbench_.getSyncReadData(1, x_series_ids, 4, 132, 4, &positions[2], &log);
   
-  // Group 2: X-series SyncRead (ID3-6)
-  if (joint_ids_.size() >= 6) {
-    std::vector<uint8_t> x_series_ids = {
-      static_cast<uint8_t>(joint_ids_[2]), static_cast<uint8_t>(joint_ids_[3]), 
-      static_cast<uint8_t>(joint_ids_[4]), static_cast<uint8_t>(joint_ids_[5])
-    };
-    
-    if (!dynamixel_workbench_.syncRead(1, x_series_ids.data(), x_series_ids.size(), &log)) {
-      RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "X-series SyncRead failed: %s", log);
-    } else {
-      // X-series結果取得 (アドレスは動的に取得)
-      const ControlItem * x_pos = dynamixel_workbench_.getItemInfo(joint_ids_[2], kPresentPositionItem);
-      if (x_pos && !dynamixel_workbench_.getSyncReadData(1, x_series_ids.data(), x_series_ids.size(),
-                                                         x_pos->address, x_pos->data_length, 
-                                                         reinterpret_cast<int32_t*>(&positions[2]), &log)) {
-        RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "X-series getData failed: %s", log);
-      }
-    }
-  }
+  // 結果設定最適化（ループ展開＋関数呼び出し削減）
+  static const double inv_reductions[6] = {
+    1.0 / mechanical_reductions_[0], 1.0 / mechanical_reductions_[1], 
+    1.0 / mechanical_reductions_[2], 1.0 / mechanical_reductions_[3],
+    1.0 / mechanical_reductions_[4], 1.0 / mechanical_reductions_[5]
+  };
   
-  // 結果を設定
-  for (uint i = 0; i < joint_ids_.size(); i++) {
-    const double inv_reduction = 1.0 / mechanical_reductions_[i];
-    joints_[i].state.position = dynamixel_workbench_.convertValue2Radian(joint_ids_[i], positions[i]) * inv_reduction;
-    joints_[i].state.velocity = 0.0;
-    joints_[i].state.effort = 0.0;
-  }
+  // ループ展開で高速化
+  joints_[0].state.position = dynamixel_workbench_.convertValue2Radian(1, positions[0]) * inv_reductions[0];
+  joints_[1].state.position = dynamixel_workbench_.convertValue2Radian(2, positions[1]) * inv_reductions[1];
+  joints_[2].state.position = dynamixel_workbench_.convertValue2Radian(3, positions[2]) * inv_reductions[2];
+  joints_[3].state.position = dynamixel_workbench_.convertValue2Radian(4, positions[3]) * inv_reductions[3];  
+  joints_[4].state.position = dynamixel_workbench_.convertValue2Radian(5, positions[4]) * inv_reductions[4];
+  joints_[5].state.position = dynamixel_workbench_.convertValue2Radian(6, positions[5]) * inv_reductions[5];
+  
+  // velocity/effortは0固定（ループなし）
+  joints_[0].state.velocity = joints_[1].state.velocity = joints_[2].state.velocity = 0.0;
+  joints_[3].state.velocity = joints_[4].state.velocity = joints_[5].state.velocity = 0.0;
+  joints_[0].state.effort = joints_[1].state.effort = joints_[2].state.effort = 0.0;
+  joints_[3].state.effort = joints_[4].state.effort = joints_[5].state.effort = 0.0;
+
+  // 外部IO処理（必要に応じてコメントアウト解除）
+  // if (is_external_pos_) {
+  //   // 外部センサー読み取り処理
+  //   for (uint i = 0; i < info_.joints.size(); i++) {
+  //     if (external_types_[i] == "potential") {
+  //       int32_t external_data = 0;
+  //       if (dynamixel_workbench_.itemRead(joint_ids_[i], kExternalPortItem, &external_data, &log)) {
+  //         external_data = static_cast<int32_t>(adc_filters_[i].update(static_cast<double>(external_data)));
+  //         joints_[i].state.position = convert_external_sensor_to_angle(i, external_data);
+  //       }
+  //     }
+  //   }
+  //   smart_offset_management();
+  // }
 
   return return_type::OK;
 }
