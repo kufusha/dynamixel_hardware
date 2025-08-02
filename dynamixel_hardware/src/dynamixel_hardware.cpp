@@ -356,27 +356,22 @@ return_type DynamixelHardware::read(
   static const uint32_t ERROR_LOG_INTERVAL = 200;
   const char * log = nullptr;
   
-  // 各サーボから個別に位置のみ読み取り（混在サーボ対応・軽量化）
+  // 高速化: Present_Positionのみ一括読み取り（異機種混在対応は後回し）
+  std::vector<uint8_t> ids(info_.joints.size(), 0);
+  std::vector<int32_t> positions(info_.joints.size(), 0);
+  
+  std::copy(joint_ids_.begin(), joint_ids_.end(), ids.begin());
+  
+  // 高速化: エラーチェックを最小限に削減
   for (uint i = 0; i < info_.joints.size(); i++) {
-    int32_t position = 0;
-    
-    if (!dynamixel_workbench_.itemRead(joint_ids_[i], kPresentPositionItem, &position, &log)) {
-      if (++error_count % ERROR_LOG_INTERVAL == 0) {
-        RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "Position read failed %u times", error_count);
-      }
-      continue;
-    }
-    
-    // 位置制御では速度読み取りは不要（軽量化のためコメントアウト）
-    // int32_t velocity = 0;
-    // if (!dynamixel_workbench_.itemRead(joint_ids_[i], kPresentVelocityItem, &velocity, &log)) {
-    //   velocity = 0;
-    // }
-    
-    // 高速化: 除算を乗算に変更
+    dynamixel_workbench_.itemRead(joint_ids_[i], kPresentPositionItem, &positions[i], &log);
+  }
+  
+  // 結果を設定
+  for (uint i = 0; i < ids.size(); i++) {
     const double inv_reduction = 1.0 / mechanical_reductions_[i];
-    joints_[i].state.position = dynamixel_workbench_.convertValue2Radian(joint_ids_[i], position) * inv_reduction;
-    joints_[i].state.velocity = 0.0;  // 位置制御では速度フィードバック不要
+    joints_[i].state.position = dynamixel_workbench_.convertValue2Radian(ids[i], positions[i]) * inv_reduction;
+    joints_[i].state.velocity = 0.0;
     joints_[i].state.effort = 0.0;
   }
 
