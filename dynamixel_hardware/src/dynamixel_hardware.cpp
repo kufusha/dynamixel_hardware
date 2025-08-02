@@ -352,25 +352,26 @@ return_type DynamixelHardware::read(
     return return_type::OK;
   }
 
-  static uint32_t error_count = 0;
-  static const uint32_t ERROR_LOG_INTERVAL = 200;
   const char * log = nullptr;
-  
-  // 高速化: Present_Positionのみ一括読み取り（異機種混在対応は後回し）
-  std::vector<uint8_t> ids(info_.joints.size(), 0);
   std::vector<int32_t> positions(info_.joints.size(), 0);
   
-  std::copy(joint_ids_.begin(), joint_ids_.end(), ids.begin());
+  // SyncRead Group 1: ID1-2(PH42,PM54) - 同じPシリーズテーブル(アドレス580)
+  // 仮実装: 個別読み取り
+  dynamixel_workbench_.itemRead(joint_ids_[0], kPresentPositionItem, &positions[0], &log); // ID:1 PH42
+  dynamixel_workbench_.itemRead(joint_ids_[1], kPresentPositionItem, &positions[1], &log); // ID:2 PM54
   
-  // 高速化: エラーチェックを最小限に削減
-  for (uint i = 0; i < info_.joints.size(); i++) {
-    dynamixel_workbench_.itemRead(joint_ids_[i], kPresentPositionItem, &positions[i], &log);
+  // SyncRead Group 2: ID3-6(XM540) - 同じXシリーズテーブル
+  // 仮実装: 個別読み取り
+  if (joint_ids_.size() >= 6) {
+    for (int i = 0; i < 4; i++) {
+      dynamixel_workbench_.itemRead(joint_ids_[2 + i], kPresentPositionItem, &positions[2 + i], &log);
+    }
   }
   
   // 結果を設定
-  for (uint i = 0; i < ids.size(); i++) {
+  for (uint i = 0; i < joint_ids_.size(); i++) {
     const double inv_reduction = 1.0 / mechanical_reductions_[i];
-    joints_[i].state.position = dynamixel_workbench_.convertValue2Radian(ids[i], positions[i]) * inv_reduction;
+    joints_[i].state.position = dynamixel_workbench_.convertValue2Radian(joint_ids_[i], positions[i]) * inv_reduction;
     joints_[i].state.velocity = 0.0;
     joints_[i].state.effort = 0.0;
   }
