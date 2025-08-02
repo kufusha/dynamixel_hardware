@@ -182,68 +182,36 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
   set_operating_modes();  // Extended Position Control設定 (先に実行)
   set_joint_params();
 
-  // 個別読み取り・書き込み方式のため、ControlItem取得・SyncWriteハンドラーは不要（コメントアウト）
-  // const ControlItem * goal_position =
-  //   dynamixel_workbench_.getItemInfo(joint_ids_[0], kGoalPositionItem);
-  // if (goal_position == nullptr) {
-  //   return CallbackReturn::ERROR;
-  // }
+  // 2グループSyncRead用のControlItem取得とハンドラー作成
+  
+  // Group 1: PH42/PM54 (ID1-2) - Pシリーズ共通テーブル
+  const ControlItem * p_series_position = dynamixel_workbench_.getItemInfo(joint_ids_[0], kPresentPositionItem);
+  if (p_series_position == nullptr) {
+    RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "P-series Present_Position not found");
+    return CallbackReturn::ERROR;
+  }
+  
+  // Group 2: XM540 (ID3-6) - Xシリーズテーブル  
+  const ControlItem * x_series_position = dynamixel_workbench_.getItemInfo(joint_ids_[2], kPresentPositionItem);
+  if (x_series_position == nullptr) {
+    RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "X-series Present_Position not found");
+    return CallbackReturn::ERROR;
+  }
 
-  // const ControlItem * present_position =
-  //   dynamixel_workbench_.getItemInfo(joint_ids_[0], kPresentPositionItem);
-  // if (present_position == nullptr) {
-  //   return CallbackReturn::ERROR;
-  // }
-
-  // const ControlItem * present_current =
-  //   dynamixel_workbench_.getItemInfo(joint_ids_[0], kPresentCurrentItem);
-  // if (present_current == nullptr) {
-  //   present_current = dynamixel_workbench_.getItemInfo(joint_ids_[0], kPresentLoadItem);
-  // }
-  // if (present_current == nullptr) {
-  //   return CallbackReturn::ERROR;
-  // }
-
-  // control_items_[kGoalPositionItem] = goal_position;
-  // control_items_[kPresentPositionItem] = present_position;
-  // control_items_[kPresentCurrentItem] = present_current;
-
-  // if (is_external_pos_) {
-  //   const ControlItem * external_port =
-  //     dynamixel_workbench_.getItemInfo(joint_ids_[0], kExternalPortItem);
-  //   if (external_port == nullptr) {
-  //     RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "External_Port_Data_1 not found");
-  //     return CallbackReturn::ERROR;
-  //   }
-  //   control_items_[kExternalPortItem] = external_port;
-  // }
-
-  // if (!dynamixel_workbench_.addSyncWriteHandler(
-  //     control_items_[kGoalPositionItem]->address, control_items_[kGoalPositionItem]->data_length,
-  //     &log))
-  // {
-  //   RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "%s", log);
-  //   return CallbackReturn::ERROR;
-  // }
-
-
-  // 個別読み取り方式のためSyncReadハンドラーは不要（コメントアウト）
-  // uint16_t start_address = std::min(
-  //   control_items_[kPresentPositionItem]->address, control_items_[kPresentCurrentItem]->address);
-  // uint16_t read_length = control_items_[kPresentPositionItem]->data_length +
-  //   control_items_[kPresentCurrentItem]->data_length + 2;
-  // if (!dynamixel_workbench_.addSyncReadHandler(start_address, read_length, &log)) {
-  //   RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "%s", log);
-  //   return CallbackReturn::ERROR;
-  // }
-
-  // if (is_external_pos_) {
-  //   if (!dynamixel_workbench_.addSyncReadHandler(
-  //       control_items_[kExternalPortItem]->address, control_items_[kExternalPortItem]->data_length, &log)) {
-  //     RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "%s", log);
-  //     return CallbackReturn::ERROR;
-  //   }
-  // }
+  // SyncReadハンドラー作成
+  // Handler 0: P-series (ID1-2)
+  if (!dynamixel_workbench_.addSyncReadHandler(
+      p_series_position->address, p_series_position->data_length, &log)) {
+    RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "P-series SyncRead handler failed: %s", log);
+    return CallbackReturn::ERROR;
+  }
+  
+  // Handler 1: X-series (ID3-6)  
+  if (!dynamixel_workbench_.addSyncReadHandler(
+      x_series_position->address, x_series_position->data_length, &log)) {
+    RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "X-series SyncRead handler failed: %s", log);
+    return CallbackReturn::ERROR;
+  }
 
   return CallbackReturn::SUCCESS;
 }
@@ -355,16 +323,37 @@ return_type DynamixelHardware::read(
   const char * log = nullptr;
   std::vector<int32_t> positions(info_.joints.size(), 0);
   
-  // SyncRead Group 1: ID1-2(PH42,PM54) - 同じPシリーズテーブル(アドレス580)
-  // 仮実装: 個別読み取り
-  dynamixel_workbench_.itemRead(joint_ids_[0], kPresentPositionItem, &positions[0], &log); // ID:1 PH42
-  dynamixel_workbench_.itemRead(joint_ids_[1], kPresentPositionItem, &positions[1], &log); // ID:2 PM54
+  // 真のSyncRead実装: 2グループで高速化
   
-  // SyncRead Group 2: ID3-6(XM540) - 同じXシリーズテーブル
-  // 仮実装: 個別読み取り
+  // Group 1: P-series SyncRead (ID1-2)
+  std::vector<uint8_t> p_series_ids = {static_cast<uint8_t>(joint_ids_[0]), static_cast<uint8_t>(joint_ids_[1])};
+  if (!dynamixel_workbench_.syncRead(0, p_series_ids.data(), p_series_ids.size(), &log)) {
+    RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "P-series SyncRead failed: %s", log);
+  } else {
+    // P-series結果取得
+    if (!dynamixel_workbench_.getSyncReadData(0, p_series_ids.data(), p_series_ids.size(), 
+                                              580, 4, reinterpret_cast<int32_t*>(&positions[0]), &log)) {
+      RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "P-series getData failed: %s", log);
+    }
+  }
+  
+  // Group 2: X-series SyncRead (ID3-6)
   if (joint_ids_.size() >= 6) {
-    for (int i = 0; i < 4; i++) {
-      dynamixel_workbench_.itemRead(joint_ids_[2 + i], kPresentPositionItem, &positions[2 + i], &log);
+    std::vector<uint8_t> x_series_ids = {
+      static_cast<uint8_t>(joint_ids_[2]), static_cast<uint8_t>(joint_ids_[3]), 
+      static_cast<uint8_t>(joint_ids_[4]), static_cast<uint8_t>(joint_ids_[5])
+    };
+    
+    if (!dynamixel_workbench_.syncRead(1, x_series_ids.data(), x_series_ids.size(), &log)) {
+      RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "X-series SyncRead failed: %s", log);
+    } else {
+      // X-series結果取得 (アドレスは動的に取得)
+      const ControlItem * x_pos = dynamixel_workbench_.getItemInfo(joint_ids_[2], kPresentPositionItem);
+      if (x_pos && !dynamixel_workbench_.getSyncReadData(1, x_series_ids.data(), x_series_ids.size(),
+                                                         x_pos->address, x_pos->data_length, 
+                                                         reinterpret_cast<int32_t*>(&positions[2]), &log)) {
+        RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "X-series getData failed: %s", log);
+      }
     }
   }
   
