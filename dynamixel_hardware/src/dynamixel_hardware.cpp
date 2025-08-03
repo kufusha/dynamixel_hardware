@@ -341,20 +341,21 @@ return_type DynamixelHardware::read(
   static const char * log = nullptr;
   static int32_t positions[6] = {0};
   static uint8_t p_series_ids[2] = {1, 2};  // ID固定（constを削除）
-  static uint8_t x_series_ids[4] = {3, 4, 5, 6};  // ID固定（constを削除）
+  static uint8_t x_series_ids[5] = {3, 4, 5, 6, 7};  // ID固定（constを削除）
   
   // SyncRead実行（最小限）
   dynamixel_workbench_.syncRead(0, p_series_ids, 2, &log);
   dynamixel_workbench_.getSyncReadData(0, p_series_ids, 2, 580, 4, &positions[0], &log);
   
-  dynamixel_workbench_.syncRead(1, x_series_ids, 4, &log);
-  dynamixel_workbench_.getSyncReadData(1, x_series_ids, 4, 132, 4, &positions[2], &log);
+  dynamixel_workbench_.syncRead(1, x_series_ids, 5, &log);
+  dynamixel_workbench_.getSyncReadData(1, x_series_ids, 5, 132, 4, &positions[2], &log);
   
   // 結果設定最適化（ループ展開＋関数呼び出し削減）
-  static const double inv_reductions[6] = {
+  static const double inv_reductions[7] = {
     1.0 / mechanical_reductions_[0], 1.0 / mechanical_reductions_[1], 
     1.0 / mechanical_reductions_[2], 1.0 / mechanical_reductions_[3],
-    1.0 / mechanical_reductions_[4], 1.0 / mechanical_reductions_[5]
+    1.0 / mechanical_reductions_[4], 1.0 / mechanical_reductions_[5],
+    1.0 / mechanical_reductions_[6]
   };
   
   // ループ展開で高速化
@@ -364,12 +365,15 @@ return_type DynamixelHardware::read(
   joints_[3].state.position = dynamixel_workbench_.convertValue2Radian(4, positions[3]) * inv_reductions[3];  
   joints_[4].state.position = dynamixel_workbench_.convertValue2Radian(5, positions[4]) * inv_reductions[4];
   joints_[5].state.position = dynamixel_workbench_.convertValue2Radian(6, positions[5]) * inv_reductions[5];
+  joints_[6].state.position = dynamixel_workbench_.convertValue2Radian(7, positions[6]) * inv_reductions[6];
   
   // velocity/effortは0固定（ループなし）
   joints_[0].state.velocity = joints_[1].state.velocity = joints_[2].state.velocity = 0.0;
   joints_[3].state.velocity = joints_[4].state.velocity = joints_[5].state.velocity = 0.0;
+  joints_[6].state.velocity = 0.0;
   joints_[0].state.effort = joints_[1].state.effort = joints_[2].state.effort = 0.0;
   joints_[3].state.effort = joints_[4].state.effort = joints_[5].state.effort = 0.0;
+  joints_[6].state.effort = 0.0;
 
   // 外部IO処理（必要に応じてコメントアウト解除）
   // if (is_external_pos_) {
@@ -543,8 +547,8 @@ CallbackReturn DynamixelHardware::set_joint_positions()
 {
   static const char * log = nullptr;
   static uint8_t p_series_ids[2] = {1, 2};
-  static uint8_t x_series_ids[4] = {3, 4, 5, 6};
-  static int32_t commands[6];
+  static uint8_t x_series_ids[5] = {3, 4, 5, 6, 7};
+  static int32_t commands[7];
   
   // prev_command更新（ループ展開）
   joints_[0].prev_command.position = joints_[0].command.position;
@@ -553,6 +557,7 @@ CallbackReturn DynamixelHardware::set_joint_positions()
   joints_[3].prev_command.position = joints_[3].command.position;
   joints_[4].prev_command.position = joints_[4].command.position;
   joints_[5].prev_command.position = joints_[5].command.position;
+  joints_[6].prev_command.position = joints_[6].command.position;
   
   // 目標位置計算（ループ展開）
   commands[0] = dynamixel_workbench_.convertRadian2Value(1, static_cast<float>(joints_[0].command.position * mechanical_reductions_[0]));
@@ -561,6 +566,7 @@ CallbackReturn DynamixelHardware::set_joint_positions()
   commands[3] = dynamixel_workbench_.convertRadian2Value(4, static_cast<float>(joints_[3].command.position * mechanical_reductions_[3]));
   commands[4] = dynamixel_workbench_.convertRadian2Value(5, static_cast<float>(joints_[4].command.position * mechanical_reductions_[4]));
   commands[5] = dynamixel_workbench_.convertRadian2Value(6, static_cast<float>(joints_[5].command.position * mechanical_reductions_[5]));
+  commands[6] = dynamixel_workbench_.convertRadian2Value(7, static_cast<float>(joints_[6].command.position * mechanical_reductions_[6]));
   
   // Debug: joint5 command tracking
   static int debug_count = 0;
@@ -572,7 +578,7 @@ CallbackReturn DynamixelHardware::set_joint_positions()
   
   // SyncWrite実行（2グループ）
   dynamixel_workbench_.syncWrite(0, p_series_ids, 2, &commands[0], 1, &log);  // P-series (ID1-2)
-  dynamixel_workbench_.syncWrite(1, x_series_ids, 4, &commands[2], 1, &log);  // X-series (ID3-6)
+  dynamixel_workbench_.syncWrite(1, x_series_ids, 5, &commands[2], 1, &log);  // X-series (ID3-7)
   
   // Update previous command positions for backlash compensation
   for (size_t i = 0; i < joints_.size(); i++) {
