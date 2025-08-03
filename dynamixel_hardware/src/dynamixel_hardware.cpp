@@ -73,6 +73,7 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
   external_types_.resize(info_.joints.size(), "none");
   calibration_data_.resize(info_.joints.size(), CalibrationData());
   adc_filters_.resize(info_.joints.size(), EMAFilter(0.2));  // α=0.2 for moderate filtering
+  prev_command_positions_.resize(info_.joints.size(), 0.0);  // Initialize previous command positions
 
   // Create ID-sorted index mapping to ensure joints are processed in ID order
   std::vector<std::pair<int, size_t>> id_index_pairs;
@@ -385,6 +386,15 @@ return_type DynamixelHardware::read(
   //   smart_offset_management();
   // }
 
+  // Backlash compensation: Apply dead band filter to prevent drift accumulation
+  for (size_t i = 0; i < joints_.size(); i++) {
+    double delta = joints_[i].state.position - prev_command_positions_[i];
+    if (std::abs(delta) < BACKLASH_DEAD_BAND) {
+      // Within dead band - likely backlash, use previous command position
+      joints_[i].state.position = prev_command_positions_[i];
+    }
+  }
+
   return return_type::OK;
 }
 
@@ -563,6 +573,11 @@ CallbackReturn DynamixelHardware::set_joint_positions()
   // SyncWrite実行（2グループ）
   dynamixel_workbench_.syncWrite(0, p_series_ids, 2, &commands[0], 1, &log);  // P-series (ID1-2)
   dynamixel_workbench_.syncWrite(1, x_series_ids, 4, &commands[2], 1, &log);  // X-series (ID3-6)
+  
+  // Update previous command positions for backlash compensation
+  for (size_t i = 0; i < joints_.size(); i++) {
+    prev_command_positions_[i] = joints_[i].command.position;
+  }
   
   return CallbackReturn::SUCCESS;
 }

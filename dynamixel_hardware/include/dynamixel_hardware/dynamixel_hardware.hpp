@@ -157,6 +157,10 @@ private:
   bool multiturn_restored_{false};
   std::vector<size_t> id_sorted_indices_;  // Mapping from ID-sorted order to original order
   
+  // Backlash compensation
+  std::vector<double> prev_command_positions_;  // Previous command positions for dead band filtering
+  static constexpr double BACKLASH_DEAD_BAND = 0.02;  // ~1.1 degrees in radians
+  
   // Offset management for potential sensor joints
   std::map<int, double> potential_offset_map_;  // joint_index -> offset value
   bool offsets_calibrated_{false};
