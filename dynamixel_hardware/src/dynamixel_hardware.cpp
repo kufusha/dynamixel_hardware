@@ -409,19 +409,20 @@ return_type DynamixelHardware::write(
     }
   }
 
-  // Check if velocity commands are set (non-zero)
+  // Force position control for all operations (joystick and MoveIt)
+  // Check if velocity commands are set (non-zero) - disabled for position-only control
   bool has_velocity_commands = false;
-  for (const auto& joint : joints_) {
-    if (std::abs(joint.command.velocity) > 1e-6) {
-      has_velocity_commands = true;
-      break;
-    }
-  }
+  // for (const auto& joint : joints_) {
+  //   if (std::abs(joint.command.velocity) > 1e-6) {
+  //     has_velocity_commands = true;
+  //     break;
+  //   }
+  // }
 
   if (has_velocity_commands) {
     set_joint_velocities();
   } else {
-    set_joint_positions();
+    set_joint_positions();  // Always use position control
   }
   return return_type::OK;
 }
@@ -477,8 +478,15 @@ return_type DynamixelHardware::set_control_mode(const ControlMode & mode, const 
   }
 
   if (mode == ControlMode::Position && (force_set || control_mode_ != ControlMode::Position)) {
+    RCLCPP_WARN(rclcpp::get_logger(kDynamixelHardware), 
+                "Control mode change detected! force_set=%s, current_mode=%d", 
+                force_set ? "true" : "false", static_cast<int>(control_mode_));
     bool torque_enabled = torque_enabled_;
     if (torque_enabled) {
+      RCLCPP_WARN(rclcpp::get_logger(kDynamixelHardware), "Torque OFF for control mode change");
+      // Preserve current position before torque off to prevent gravity drop
+      read(rclcpp::Time{}, rclcpp::Duration(0, 0));  // Get latest position
+      reset_command();  // Set command position = current position
       enable_torque(false);
     }
 
@@ -543,6 +551,14 @@ CallbackReturn DynamixelHardware::set_joint_positions()
   commands[3] = dynamixel_workbench_.convertRadian2Value(4, static_cast<float>(joints_[3].command.position * mechanical_reductions_[3]));
   commands[4] = dynamixel_workbench_.convertRadian2Value(5, static_cast<float>(joints_[4].command.position * mechanical_reductions_[4]));
   commands[5] = dynamixel_workbench_.convertRadian2Value(6, static_cast<float>(joints_[5].command.position * mechanical_reductions_[5]));
+  
+  // Debug: joint5 command tracking
+  static int debug_count = 0;
+  if (++debug_count % 100 == 0) {  // Every 100 cycles
+    RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), 
+                "Joint5 cmd=%.3f, prev=%.3f, dxl_cmd=%d", 
+                joints_[4].command.position, joints_[4].prev_command.position, commands[4]);
+  }
   
   // SyncWrite実行（2グループ）
   dynamixel_workbench_.syncWrite(0, p_series_ids, 2, &commands[0], 1, &log);  // P-series (ID1-2)
