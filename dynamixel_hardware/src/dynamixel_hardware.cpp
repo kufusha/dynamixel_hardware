@@ -461,24 +461,15 @@ return_type DynamixelHardware::write(
     }
   }
 
-  bool use_velocity = false;
-  for (const auto & j : joints_){
-    if (std::abs(j.command.velocity) > 1e-6) {use_velocity = true; break;}
+  // Always use velocity control mode to avoid unnecessary mode switching
+  if (joints_.size() > 6 && calibration_data_[6].external_type == "dual_limit"){
+    bool high = read_external_io(calibration_data_[6].external_io_high);
+    bool low = read_external_io(calibration_data_[6].external_io_low);
+    if(high && joints_[6].command.velocity > 0.0) joints_[6].command.velocity = 0.0;
+    if(low  && joints_[6].command.velocity < 0.0) joints_[6].command.velocity = 0.0;
   }
-
-  if (use_velocity){
-    if (joints_.size() > 6 && calibration_data_[6].external_type == "dual_limit"){
-      bool high = read_external_io(calibration_data_[6].external_io_high);
-      bool low = read_external_io(calibration_data_[6].external_io_low);
-      if(high && joints_[6].command.velocity > 0.0) joints_[6].command.velocity = 0.0;
-      if(low  && joints_[6].command.velocity < 0.0) joints_[6].command.velocity = 0.0;
-    }
-    set_control_mode(ControlMode::Velocity);
-    set_joint_velocities();
-  } else {
-    set_control_mode(ControlMode::Position);
-    set_joint_positions();
-  }
+  set_control_mode(ControlMode::Velocity);
+  set_joint_velocities();
   return return_type::OK;
 }
 
