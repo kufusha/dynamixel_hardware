@@ -20,6 +20,7 @@
 #include <limits>
 #include <string>
 #include <vector>
+#include <cmath>
 
 #include "hardware_interface/types/hardware_interface_return_values.hpp"
 #include "hardware_interface/types/hardware_interface_type_values.hpp"
@@ -191,6 +192,11 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
     RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "P-series Present_Position not found");
     return CallbackReturn::ERROR;
   }
+  const ControlItem * p_series_velocity = dynamixel_workbench_.getItemInfo(joint_ids_[0], kPresentVelocityItem);
+  if (p_series_velocity == nullptr){
+    RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "P-series Present_Velocity not found");
+    return CallbackReturn::ERROR;
+  }
   
   // Group 2: XM540 (ID3-6) - Xシリーズテーブル  
   const ControlItem * x_series_position = dynamixel_workbench_.getItemInfo(joint_ids_[2], kPresentPositionItem);
@@ -198,6 +204,12 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
     RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "X-series Present_Position not found");
     return CallbackReturn::ERROR;
   }
+  const ControlItem * x_series_velocity = dynamixel_workbench_.getItemInfo(joint_ids_[2], kPresentVelocityItem);
+  if (x_series_velocity == nullptr) {
+    RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "X-series Present_Velocity not found");
+    return CallbackReturn::ERROR;
+  }
+
 
   // SyncReadハンドラー作成
   // Handler 0: P-series (ID1-2)
@@ -210,6 +222,20 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
   // Handler 1: X-series (ID3-6)  
   if (!dynamixel_workbench_.addSyncReadHandler(
       x_series_position->address, x_series_position->data_length, &log)) {
+    RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "X-series SyncRead handler failed: %s", log);
+    return CallbackReturn::ERROR;
+  }
+
+  // Handler 2: P-series-velocity (ID1-2)  
+  if (!dynamixel_workbench_.addSyncReadHandler(
+      x_series_velocity->address, p_series_velocity->data_length, &log)) {
+    RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "P-series SyncRead handler failed: %s", log);
+    return CallbackReturn::ERROR;
+  }
+
+  // Handler 3: X-series-velocity (ID3-6)  
+  if (!dynamixel_workbench_.addSyncReadHandler(
+      x_series_velocity->address, x_series_velocity->data_length, &log)) {
     RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "X-series SyncRead handler failed: %s", log);
     return CallbackReturn::ERROR;
   }
@@ -339,7 +365,8 @@ return_type DynamixelHardware::read(
 
   // 超高速化: static配列とループ最適化
   static const char * log = nullptr;
-  static int32_t positions[6] = {0};
+  static int32_t positions[7] = {0};
+  static int32_t velocities[7] = {0};
   static uint8_t p_series_ids[2] = {1, 2};  // ID固定（constを削除）
   static uint8_t x_series_ids[5] = {3, 4, 5, 6, 7};  // ID固定（constを削除）
   
@@ -349,15 +376,21 @@ return_type DynamixelHardware::read(
   
   dynamixel_workbench_.syncRead(1, x_series_ids, 5, &log);
   dynamixel_workbench_.getSyncReadData(1, x_series_ids, 5, 132, 4, &positions[2], &log);
-  
+
+  dynamixel_workbench_.syncRead(2, p_series_ids, 2, &log);
+  dynamixel_workbench_.getSyncReadData(2, p_series_ids, 2, 584, 4, &velocities[0], &log);
+
+  dynamixel_workbench_.syncRead(3, x_series_ids, 5, &log);
+  dynamixel_workbench_.getSyncReadData(3, x_series_ids, 5, 128, 4, &velocities[2], &log);
+
   // 結果設定最適化（ループ展開＋関数呼び出し削減）
-  static const double inv_reductions[7] = {
-    1.0 / mechanical_reductions_[0], 1.0 / mechanical_reductions_[1], 
-    1.0 / mechanical_reductions_[2], 1.0 / mechanical_reductions_[3],
-    1.0 / mechanical_reductions_[4], 1.0 / mechanical_reductions_[5],
-    1.0 / mechanical_reductions_[6]
-  };
-  
+   static const double inv_reductions[7] = {
+     1.0 / mechanical_reductions_[0], 1.0 / mechanical_reductions_[1], 
+     1.0 / mechanical_reductions_[2], 1.0 / mechanical_reductions_[3],
+     1.0 / mechanical_reductions_[4], 1.0 / mechanical_reductions_[5],
+     1.0 / mechanical_reductions_[6]
+   };
+
   // ループ展開で高速化
   joints_[0].state.position = dynamixel_workbench_.convertValue2Radian(1, positions[0]) * inv_reductions[0];
   joints_[1].state.position = dynamixel_workbench_.convertValue2Radian(2, positions[1]) * inv_reductions[1];
@@ -367,10 +400,15 @@ return_type DynamixelHardware::read(
   joints_[5].state.position = dynamixel_workbench_.convertValue2Radian(6, positions[5]) * inv_reductions[5];
   joints_[6].state.position = dynamixel_workbench_.convertValue2Radian(7, positions[6]) * inv_reductions[6];
   
+  joints_[0].state.velocity = dynamixel_workbench_.convertValue2Velocity(1, velocities[0]) * inv_reductions[0];
+  joints_[1].state.velocity = dynamixel_workbench_.convertValue2Velocity(2, velocities[1]) * inv_reductions[1];
+  joints_[2].state.velocity = dynamixel_workbench_.convertValue2Velocity(3, velocities[2]) * inv_reductions[2];
+  joints_[3].state.velocity = dynamixel_workbench_.convertValue2Velocity(4, velocities[3]) * inv_reductions[3];  
+  joints_[4].state.velocity = dynamixel_workbench_.convertValue2Velocity(5, velocities[4]) * inv_reductions[4];
+  joints_[5].state.velocity = dynamixel_workbench_.convertValue2Velocity(6, velocities[5]) * inv_reductions[5];
+  joints_[6].state.velocity = dynamixel_workbench_.convertValue2Velocity(7, velocities[6]) * inv_reductions[6];
+
   // velocity/effortは0固定（ループなし）
-  joints_[0].state.velocity = joints_[1].state.velocity = joints_[2].state.velocity = 0.0;
-  joints_[3].state.velocity = joints_[4].state.velocity = joints_[5].state.velocity = 0.0;
-  joints_[6].state.velocity = 0.0;
   joints_[0].state.effort = joints_[1].state.effort = joints_[2].state.effort = 0.0;
   joints_[3].state.effort = joints_[4].state.effort = joints_[5].state.effort = 0.0;
   joints_[6].state.effort = 0.0;
@@ -423,20 +461,23 @@ return_type DynamixelHardware::write(
     }
   }
 
-  // Force position control for all operations (joystick and MoveIt)
-  // Check if velocity commands are set (non-zero) - disabled for position-only control
-  bool has_velocity_commands = false;
-  // for (const auto& joint : joints_) {
-  //   if (std::abs(joint.command.velocity) > 1e-6) {
-  //     has_velocity_commands = true;
-  //     break;
-  //   }
-  // }
+  bool use_velocity = false;
+  for (const auto & j : joints_){
+    if (std::abs(j.command.velocity) > 1e-6) {use_velocity = true; break;}
+  }
 
-  if (has_velocity_commands) {
+  if (use_velocity){
+    if (joints_.size() > 6 && calibration_data_[6].external_type == "dual_limit"){
+      bool high = read_external_io(calibration_data_[6].external_io_high);
+      bool low = read_external_io(calibration_data_[6].external_io_low);
+      if(high && joints_[6].command.velocity > 0.0) joints_[6].command.velocity = 0.0;
+      if(low  && joints_[6].command.velocity < 0.0) joints_[6].command.velocity = 0.0;
+    }
+    set_control_mode(ControlMode::Velocity);
     set_joint_velocities();
   } else {
-    set_joint_positions();  // Always use position control
+    set_control_mode(ControlMode::Position);
+    set_joint_positions();
   }
   return return_type::OK;
 }
@@ -474,23 +515,6 @@ return_type DynamixelHardware::set_control_mode(const ControlMode & mode, const 
   const char * log = nullptr;
   mode_changed_ = false;
 
-  // Check if any joints have custom operating_mode parameters
-  bool has_custom_operating_modes = false;
-  for (uint i = 0; i < info_.joints.size(); ++i) {
-    if (info_.joints[i].parameters.find("operating_mode") != info_.joints[i].parameters.end()) {
-      has_custom_operating_modes = true;
-      break;
-    }
-  }
-
-  // If custom operating modes are set, skip default position control mode setting
-  if (has_custom_operating_modes) {
-    RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), 
-                "Custom operating modes detected, skipping default position control setup");
-    control_mode_ = ControlMode::Position;  // Assume position-based control
-    return return_type::OK;
-  }
-
   if (mode == ControlMode::Position && (force_set || control_mode_ != ControlMode::Position)) {
     RCLCPP_WARN(rclcpp::get_logger(kDynamixelHardware), 
                 "Control mode change detected! force_set=%s, current_mode=%d", 
@@ -522,10 +546,29 @@ return_type DynamixelHardware::set_control_mode(const ControlMode & mode, const 
     return return_type::OK;
   }
 
-  if (control_mode_ != ControlMode::Position) {
-    RCLCPP_FATAL(
-      rclcpp::get_logger(kDynamixelHardware), "Only position control is implemented");
-    return return_type::ERROR;
+  if (mode == ControlMode::Velocity && (force_set || control_mode_ != ControlMode::Velocity)) {
+    bool torque_enabled = torque_enabled_;
+    if (torque_enabled) {
+      // 重力落下対策：最新位置をコマンドへ反映してからOFF
+      read(rclcpp::Time{}, rclcpp::Duration(0, 0));
+      reset_command();
+      enable_torque(false);
+    }
+    for (uint i = 0; i < joint_ids_.size(); ++i) {
+      if (!dynamixel_workbench_.setVelocityControlMode(joint_ids_[i], &log)) {
+        RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "%s", log);
+        return return_type::ERROR;
+      }
+    }
+    RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), "Velocity control");
+    if (control_mode_ != ControlMode::Velocity) {
+      mode_changed_ = true;
+      control_mode_ = ControlMode::Velocity;
+    }
+    if (torque_enabled) {
+      enable_torque(true);
+    }
+    return return_type::OK;
   }
 
   return return_type::OK;
