@@ -19,6 +19,7 @@
 
 #include <map>
 #include <vector>
+#include <chrono>
 
 #include <hardware_interface/handle.hpp>
 #include <hardware_interface/hardware_info.hpp>
@@ -105,6 +106,29 @@ private:
   ControlMode control_mode_{ControlMode::Position};
   bool mode_changed_{false};
   bool use_dummy_{false};
+
+  // ===== 追加メンバ（速度固定運用のため） =====
+  bool fixed_velocity_mode_ = true;                  // 速度モード固定
+  double alpha_ = 0.8;                               // 速度LPF係数（0.7〜0.9程度）
+  double dv_max_ = 0.2;                              // 1周期あたりの速度変化上限 [rad/s/step]
+  size_t read_divider_ = 10;                         // read間引き（N周期に1回）
+  size_t read_count_ = 0;                            // カウンタ
+  rclcpp::Time last_cmd_time_;                       // 最終コマンド時刻
+  std::chrono::milliseconds watchdog_timeout_{100};  // 入力ロスト監視 [ms]
+  std::vector<double> v_out_;                        // 平滑後の送出速度
+  std::vector<double> vel_limit_;                    // 任意：各関節の速度上限 [rad/s]
+
+  // ===== ヘルパ関数 =====
+  // LPF＋Δv制限＋飽和をかけて v_out_ を更新（write()から呼ぶ）
+  void update_velocity_commands_with_filters(const rclcpp::Duration & period);
+  // フィルタ済み速度をGoal_VelocityでSyncWrite送信
+  CallbackReturn set_joint_velocities_filtered(const std::vector<double>& vel);
+
+  // 既存: set_joint_velocities()/set_joint_positions() 等はそのまま保持
+
+  // 速度固定時にPosition切替要求を無視するなら set_control_mode 内で判定（cpp側diff参照）
+
+
 };
 }  // namespace dynamixel_hardware
 

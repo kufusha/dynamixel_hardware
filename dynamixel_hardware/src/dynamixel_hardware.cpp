@@ -19,6 +19,7 @@
 #include <limits>
 #include <string>
 #include <vector>
+#include <cmath>
 
 #include "hardware_interface/types/hardware_interface_return_values.hpp"
 #include "hardware_interface/types/hardware_interface_type_values.hpp"
@@ -106,7 +107,7 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
   }
 
   enable_torque(false);
-  set_control_mode(ControlMode::Position, true);
+  set_control_mode(ControlMode::Velocity, true);
   set_joint_params();
 
   const ControlItem * goal_position =
@@ -301,12 +302,15 @@ return_type DynamixelHardware::read(
 
 return_type DynamixelHardware::write(
   const rclcpp::Time & /* time */,
-  const rclcpp::Duration & /* period */)
+  const rclcpp::Duration & period)
 {
   if (use_dummy_) {
+    // === ここを変更：速度コマンドを積分して position を更新（RVizで動くように） ===
+    const double dt = std::max(1e-6, period.seconds());
     for (auto & joint : joints_) {
-      joint.prev_command.position = joint.command.position;
-      joint.state.position = joint.command.position;
+      joint.prev_command.velocity = joint.command.velocity;
+      joint.state.velocity = joint.command.velocity;
+      joint.state.position += joint.command.velocity * dt;
     }
     return return_type::OK;
   }
