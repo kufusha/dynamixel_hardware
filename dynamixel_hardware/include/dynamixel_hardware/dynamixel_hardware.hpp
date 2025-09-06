@@ -121,6 +121,22 @@ private:
   void restore_multiturn_from_potential();
   int calculate_turn_offset(double true_angle, double single_turn_angle);
   
+  // Offset management for potential sensor joints
+  void calibrate_potential_offsets();
+  double apply_potential_offset(int joint_index, double goal_position);
+  double get_corrected_dynamixel_position(int joint_index);
+  
+  // Hybrid offset management
+  void smart_offset_management();
+  void update_offset_if_needed(int joint_index);
+  void full_recalibration();
+  double calculate_current_offset(int joint_index);
+  
+  // Safety functions
+  double clamp_to_safe_range(int joint_index, double angle);
+  bool is_in_safe_range(int joint_index, double angle);
+  void emergency_move_to_safe_position(int joint_index);
+  
   // Service callbacks
   // void torque_enable_service_callback(
   //   const std::shared_ptr<std_srvs::srv::SetBool::Request> request,
@@ -139,6 +155,21 @@ private:
   bool use_dummy_{false};
   bool is_external_pos_{false};
   bool multiturn_restored_{false};
+  std::vector<size_t> id_sorted_indices_;  // Mapping from ID-sorted order to original order
+  
+  // Backlash compensation
+  std::vector<double> prev_command_positions_;  // Previous command positions for dead band filtering
+  static constexpr double BACKLASH_DEAD_BAND = 0.02;  // ~1.1 degrees in radians
+  
+  // Offset management for potential sensor joints
+  std::map<int, double> potential_offset_map_;  // joint_index -> offset value
+  bool offsets_calibrated_{false};
+  
+  // Hybrid offset management
+  std::map<int, double> offset_history_;  // For deviation tracking
+  std::chrono::steady_clock::time_point last_full_calibration_;
+  static constexpr double OFFSET_DEVIATION_THRESHOLD = 0.02;  // 1.1度の閾値
+  static constexpr std::chrono::seconds FULL_RECALIBRATION_INTERVAL{10};  // 10秒間隔
   
   // Exponential Moving Average filter for ADC noise reduction
   struct EMAFilter {

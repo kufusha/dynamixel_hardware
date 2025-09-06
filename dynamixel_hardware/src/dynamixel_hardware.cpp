@@ -16,9 +16,11 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <limits>
 #include <string>
 #include <vector>
+#include <cmath>
 
 #include "hardware_interface/types/hardware_interface_return_values.hpp"
 #include "hardware_interface/types/hardware_interface_type_values.hpp"
@@ -34,6 +36,7 @@ constexpr uint8_t kExternalPortIndex = 1;
 constexpr const char * kGoalPositionItem = "Goal_Position";
 constexpr const char * kGoalVelocityItem = "Goal_Velocity";
 constexpr const char * kPresentPositionItem = "Present_Position";
+constexpr const char * kPresentVelocityItem = "Present_Velocity";
 constexpr const char * kPresentCurrentItem = "Present_Current";
 constexpr const char * kPresentLoadItem = "Present_Load";
 constexpr const char * kExternalPortItem = "External_Port_Data_1";
@@ -49,7 +52,6 @@ constexpr const char * const kExtraJointParameters[] = {
 
 CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo & info)
 {
-  RCLCPP_DEBUG(rclcpp::get_logger(kDynamixelHardware), "configure");
   if (hardware_interface::SystemInterface::on_init(info) != CallbackReturn::SUCCESS) {
     return CallbackReturn::ERROR;
   }
@@ -72,48 +74,66 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
   external_types_.resize(info_.joints.size(), "none");
   calibration_data_.resize(info_.joints.size(), CalibrationData());
   adc_filters_.resize(info_.joints.size(), EMAFilter(0.2));  // α=0.2 for moderate filtering
+  prev_command_positions_.resize(info_.joints.size(), 0.0);  // Initialize previous command positions
+
+  // Create ID-sorted index mapping to ensure joints are processed in ID order
+  std::vector<std::pair<int, size_t>> id_index_pairs;
+  for (size_t i = 0; i < info_.joints.size(); i++) {
+    int joint_id = std::stoi(info_.joints[i].parameters.at("id"));
+    id_index_pairs.push_back({joint_id, i});
+  }
+  std::sort(id_index_pairs.begin(), id_index_pairs.end());
+  
+  // Create sorted index mapping
+  id_sorted_indices_.resize(info_.joints.size());
+  for (size_t i = 0; i < id_index_pairs.size(); i++) {
+    id_sorted_indices_[i] = id_index_pairs[i].second;
+  }
+  
+  // Debug: Print original and sorted joint order
 
   for (uint i = 0; i < info_.joints.size(); i++) {
-    joint_ids_[i] = std::stoi(info_.joints[i].parameters.at("id"));
-    if (info_.joints[i].parameters.count("mechanical_reduction") > 0) {
-      mechanical_reductions_[i] = std::stof(info_.joints[i].parameters.at("mechanical_reduction"));
+    size_t orig_idx = id_sorted_indices_[i];
+    joint_ids_[i] = std::stoi(info_.joints[orig_idx].parameters.at("id"));
+    if (info_.joints[orig_idx].parameters.count("mechanical_reduction") > 0) {
+      mechanical_reductions_[i] = std::stof(info_.joints[orig_idx].parameters.at("mechanical_reduction"));
     }
-    if (info_.joints[i].parameters.count("external_type") > 0) {
-      external_types_[i] = info_.joints[i].parameters.at("external_type");
+    if (info_.joints[orig_idx].parameters.count("external_type") > 0) {
+      external_types_[i] = info_.joints[orig_idx].parameters.at("external_type");
       calibration_data_[i].external_type = external_types_[i];
       
       // Load calibration parameters for potentiometer
       if (external_types_[i] == "potential") {
-        if (info_.joints[i].parameters.count("angle_min") > 0) {
-          calibration_data_[i].angle_min = std::stof(info_.joints[i].parameters.at("angle_min"));
+        if (info_.joints[orig_idx].parameters.count("angle_min") > 0) {
+          calibration_data_[i].angle_min = std::stof(info_.joints[orig_idx].parameters.at("angle_min"));
         }
-        if (info_.joints[i].parameters.count("adc_min") > 0) {
-          calibration_data_[i].adc_min = std::stof(info_.joints[i].parameters.at("adc_min"));
+        if (info_.joints[orig_idx].parameters.count("adc_min") > 0) {
+          calibration_data_[i].adc_min = std::stof(info_.joints[orig_idx].parameters.at("adc_min"));
         }
-        if (info_.joints[i].parameters.count("angle_max") > 0) {
-          calibration_data_[i].angle_max = std::stof(info_.joints[i].parameters.at("angle_max"));
+        if (info_.joints[orig_idx].parameters.count("angle_max") > 0) {
+          calibration_data_[i].angle_max = std::stof(info_.joints[orig_idx].parameters.at("angle_max"));
         }
-        if (info_.joints[i].parameters.count("adc_max") > 0) {
-          calibration_data_[i].adc_max = std::stof(info_.joints[i].parameters.at("adc_max"));
+        if (info_.joints[orig_idx].parameters.count("adc_max") > 0) {
+          calibration_data_[i].adc_max = std::stof(info_.joints[orig_idx].parameters.at("adc_max"));
         }
       }
       
       // Load calibration parameters for dual limit
       if (external_types_[i] == "dual_limit") {
-        if (info_.joints[i].parameters.count("high_limit") > 0) {
-          calibration_data_[i].high_limit = std::stof(info_.joints[i].parameters.at("high_limit"));
+        if (info_.joints[orig_idx].parameters.count("high_limit") > 0) {
+          calibration_data_[i].high_limit = std::stof(info_.joints[orig_idx].parameters.at("high_limit"));
         }
-        if (info_.joints[i].parameters.count("low_limit") > 0) {
-          calibration_data_[i].low_limit = std::stof(info_.joints[i].parameters.at("low_limit"));
+        if (info_.joints[orig_idx].parameters.count("low_limit") > 0) {
+          calibration_data_[i].low_limit = std::stof(info_.joints[orig_idx].parameters.at("low_limit"));
         }
-        if (info_.joints[i].parameters.count("external_io_high") > 0) {
-          calibration_data_[i].external_io_high = std::stoi(info_.joints[i].parameters.at("external_io_high"));
+        if (info_.joints[orig_idx].parameters.count("external_io_high") > 0) {
+          calibration_data_[i].external_io_high = std::stoi(info_.joints[orig_idx].parameters.at("external_io_high"));
         }
-        if (info_.joints[i].parameters.count("external_io_low") > 0) {
-          calibration_data_[i].external_io_low = std::stoi(info_.joints[i].parameters.at("external_io_low"));
+        if (info_.joints[orig_idx].parameters.count("external_io_low") > 0) {
+          calibration_data_[i].external_io_low = std::stoi(info_.joints[orig_idx].parameters.at("external_io_low"));
         }
-        if (info_.joints[i].parameters.count("safety_margin") > 0) {
-          calibration_data_[i].safety_margin = std::stof(info_.joints[i].parameters.at("safety_margin"));
+        if (info_.joints[orig_idx].parameters.count("safety_margin") > 0) {
+          calibration_data_[i].safety_margin = std::stof(info_.joints[orig_idx].parameters.at("safety_margin"));
         }
       }
     }
@@ -123,8 +143,6 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
     joints_[i].command.effort = std::numeric_limits<double>::quiet_NaN();
     joints_[i].prev_command.position = joints_[i].command.position;
     joints_[i].prev_command.effort = joints_[i].command.effort;
-    RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), "joint_id %d: %d, external_type: %s", 
-                i, joint_ids_[i], external_types_[i].c_str());
   }
 
   if (
@@ -148,8 +166,6 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
   auto baud_rate = std::stoi(info_.hardware_parameters.at("baud_rate"));
   const char * log = nullptr;
 
-  RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), "usb_port: %s", usb_port.c_str());
-  RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), "baud_rate: %d", baud_rate);
 
   if (!dynamixel_workbench_.init(usb_port.c_str(), baud_rate, &log)) {
     RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "%s", log);
@@ -168,67 +184,76 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
   set_operating_modes();  // Extended Position Control設定 (先に実行)
   set_joint_params();
 
-  const ControlItem * goal_position =
-    dynamixel_workbench_.getItemInfo(joint_ids_[0], kGoalPositionItem);
-  if (goal_position == nullptr) {
+  // 2グループSyncRead用のControlItem取得とハンドラー作成
+  
+  // Group 1: PH42/PM54 (ID1-2) - Pシリーズ共通テーブル
+  const ControlItem * p_series_position = dynamixel_workbench_.getItemInfo(joint_ids_[0], kPresentPositionItem);
+  if (p_series_position == nullptr) {
+    RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "P-series Present_Position not found");
+    return CallbackReturn::ERROR;
+  }
+  const ControlItem * p_series_velocity = dynamixel_workbench_.getItemInfo(joint_ids_[0], kPresentVelocityItem);
+  if (p_series_velocity == nullptr){
+    RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "P-series Present_Velocity not found");
+    return CallbackReturn::ERROR;
+  }
+  
+  // Group 2: XM540 (ID3-6) - Xシリーズテーブル  
+  const ControlItem * x_series_position = dynamixel_workbench_.getItemInfo(joint_ids_[2], kPresentPositionItem);
+  if (x_series_position == nullptr) {
+    RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "X-series Present_Position not found");
+    return CallbackReturn::ERROR;
+  }
+  const ControlItem * x_series_velocity = dynamixel_workbench_.getItemInfo(joint_ids_[2], kPresentVelocityItem);
+  if (x_series_velocity == nullptr) {
+    RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "X-series Present_Velocity not found");
     return CallbackReturn::ERROR;
   }
 
 
-  const ControlItem * present_position =
-    dynamixel_workbench_.getItemInfo(joint_ids_[0], kPresentPositionItem);
-  if (present_position == nullptr) {
+  // SyncReadハンドラー作成
+  // Handler 0: P-series (ID1-2)
+  if (!dynamixel_workbench_.addSyncReadHandler(
+      p_series_position->address, p_series_position->data_length, &log)) {
+    RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "P-series SyncRead handler failed: %s", log);
+    return CallbackReturn::ERROR;
+  }
+  
+  // Handler 1: X-series (ID3-6)  
+  if (!dynamixel_workbench_.addSyncReadHandler(
+      x_series_position->address, x_series_position->data_length, &log)) {
+    RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "X-series SyncRead handler failed: %s", log);
     return CallbackReturn::ERROR;
   }
 
-
-  const ControlItem * present_current =
-    dynamixel_workbench_.getItemInfo(joint_ids_[0], kPresentCurrentItem);
-  if (present_current == nullptr) {
-    present_current = dynamixel_workbench_.getItemInfo(joint_ids_[0], kPresentLoadItem);
-  }
-  if (present_current == nullptr) {
+  // Handler 2: P-series-velocity (ID1-2)  
+  if (!dynamixel_workbench_.addSyncReadHandler(
+      x_series_velocity->address, p_series_velocity->data_length, &log)) {
+    RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "P-series SyncRead handler failed: %s", log);
     return CallbackReturn::ERROR;
   }
 
-  control_items_[kGoalPositionItem] = goal_position;
-  control_items_[kPresentPositionItem] = present_position;
-  control_items_[kPresentCurrentItem] = present_current;
-
-  if (is_external_pos_) {
-    const ControlItem * external_port =
-      dynamixel_workbench_.getItemInfo(joint_ids_[0], kExternalPortItem);
-    if (external_port == nullptr) {
-      RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "External_Port_Data_1 not found");
-      return CallbackReturn::ERROR;
-    }
-    control_items_[kExternalPortItem] = external_port;
-  }
-
-  if (!dynamixel_workbench_.addSyncWriteHandler(
-      control_items_[kGoalPositionItem]->address, control_items_[kGoalPositionItem]->data_length,
-      &log))
-  {
-    RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "%s", log);
+  // Handler 3: X-series-velocity (ID3-6)  
+  if (!dynamixel_workbench_.addSyncReadHandler(
+      x_series_velocity->address, x_series_velocity->data_length, &log)) {
+    RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "X-series SyncRead handler failed: %s", log);
     return CallbackReturn::ERROR;
   }
 
-
-  uint16_t start_address = std::min(
-    control_items_[kPresentPositionItem]->address, control_items_[kPresentCurrentItem]->address);
-  uint16_t read_length = control_items_[kPresentPositionItem]->data_length +
-    control_items_[kPresentCurrentItem]->data_length + 2;
-  if (!dynamixel_workbench_.addSyncReadHandler(start_address, read_length, &log)) {
-    RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "%s", log);
+  // SyncWriteハンドラー作成（Goal_Position用）
+  const ControlItem * p_series_goal = dynamixel_workbench_.getItemInfo(joint_ids_[0], kGoalPositionItem);
+  const ControlItem * x_series_goal = dynamixel_workbench_.getItemInfo(joint_ids_[2], kGoalPositionItem);
+  
+  if (p_series_goal && !dynamixel_workbench_.addSyncWriteHandler(
+      p_series_goal->address, p_series_goal->data_length, &log)) {
+    RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "P-series SyncWrite handler failed: %s", log);
     return CallbackReturn::ERROR;
   }
-
-  if (is_external_pos_) {
-    if (!dynamixel_workbench_.addSyncReadHandler(
-        control_items_[kExternalPortItem]->address, control_items_[kExternalPortItem]->data_length, &log)) {
-      RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "%s", log);
-      return CallbackReturn::ERROR;
-    }
+  
+  if (x_series_goal && !dynamixel_workbench_.addSyncWriteHandler(
+      x_series_goal->address, x_series_goal->data_length, &log)) {
+    RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "X-series SyncWrite handler failed: %s", log);
+    return CallbackReturn::ERROR;
   }
 
   return CallbackReturn::SUCCESS;
@@ -236,18 +261,30 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
 
 std::vector<hardware_interface::StateInterface> DynamixelHardware::export_state_interfaces()
 {
-  RCLCPP_DEBUG(rclcpp::get_logger(kDynamixelHardware), "export_state_interfaces");
+  
   std::vector<hardware_interface::StateInterface> state_interfaces;
+  // 元の順序（URDF順）でエクスポート、データはID順配列から取得
   for (uint i = 0; i < info_.joints.size(); i++) {
+    // info_.joints[i]から関節IDを取得し、対応するデータ配列のインデックスを見つける
+    int joint_id = std::stoi(info_.joints[i].parameters.at("id"));
+    size_t data_idx = 0;
+    for (size_t j = 0; j < joint_ids_.size(); j++) {
+      if (joint_ids_[j] == joint_id) {
+        data_idx = j;
+        break;
+      }
+    }
+
+    
     state_interfaces.emplace_back(
       hardware_interface::StateInterface(
-        info_.joints[i].name, hardware_interface::HW_IF_POSITION, &joints_[i].state.position));
+        info_.joints[i].name, hardware_interface::HW_IF_POSITION, &joints_[data_idx].state.position));
     state_interfaces.emplace_back(
       hardware_interface::StateInterface(
-        info_.joints[i].name, hardware_interface::HW_IF_VELOCITY, &joints_[i].state.velocity));
+        info_.joints[i].name, hardware_interface::HW_IF_VELOCITY, &joints_[data_idx].state.velocity));
     state_interfaces.emplace_back(
       hardware_interface::StateInterface(
-        info_.joints[i].name, hardware_interface::HW_IF_EFFORT, &joints_[i].state.effort));
+        info_.joints[i].name, hardware_interface::HW_IF_EFFORT, &joints_[data_idx].state.effort));
   }
 
   return state_interfaces;
@@ -255,15 +292,25 @@ std::vector<hardware_interface::StateInterface> DynamixelHardware::export_state_
 
 std::vector<hardware_interface::CommandInterface> DynamixelHardware::export_command_interfaces()
 {
-  RCLCPP_DEBUG(rclcpp::get_logger(kDynamixelHardware), "export_command_interfaces");
   std::vector<hardware_interface::CommandInterface> command_interfaces;
+  // 元の順序（URDF順）でエクスポート、データはID順配列から取得
   for (uint i = 0; i < info_.joints.size(); i++) {
+    // info_.joints[i]から関節IDを取得し、対応するデータ配列のインデックスを見つける
+    int joint_id = std::stoi(info_.joints[i].parameters.at("id"));
+    size_t data_idx = 0;
+    for (size_t j = 0; j < joint_ids_.size(); j++) {
+      if (joint_ids_[j] == joint_id) {
+        data_idx = j;
+        break;
+      }
+    }
+    
     command_interfaces.emplace_back(
       hardware_interface::CommandInterface(
-        info_.joints[i].name, hardware_interface::HW_IF_POSITION, &joints_[i].command.position));
+        info_.joints[i].name, hardware_interface::HW_IF_POSITION, &joints_[data_idx].command.position));
     command_interfaces.emplace_back(
       hardware_interface::CommandInterface(
-        info_.joints[i].name, hardware_interface::HW_IF_VELOCITY, &joints_[i].command.velocity));
+        info_.joints[i].name, hardware_interface::HW_IF_VELOCITY, &joints_[data_idx].command.velocity));
   }
 
   return command_interfaces;
@@ -271,7 +318,6 @@ std::vector<hardware_interface::CommandInterface> DynamixelHardware::export_comm
 
 CallbackReturn DynamixelHardware::on_configure(const rclcpp_lifecycle::State & /* previous_state */)
 {
-  RCLCPP_DEBUG(rclcpp::get_logger(kDynamixelHardware), "start");
   for (uint i = 0; i < joints_.size(); i++) {
     if (use_dummy_ && std::isnan(joints_[i].state.position)) {
       joints_[i].state.position = 0.0;
@@ -285,6 +331,16 @@ CallbackReturn DynamixelHardware::on_configure(const rclcpp_lifecycle::State & /
   // Restore multiturn position from potential sensors (before torque enable)
   restore_multiturn_from_potential();
   
+  // Calibrate potential sensor offsets
+  calibrate_potential_offsets();
+  
+  // Safety check: Move dangerous joints to safe positions
+  for (uint i = 0; i < joints_.size(); i++) {
+    if (external_types_[i] == "potential") {
+      emergency_move_to_safe_position(i);
+    }
+  }
+  
   // Don't write initial position commands to avoid unexpected movement
   // write(rclcpp::Time{}, rclcpp::Duration(0, 0));
 
@@ -296,7 +352,6 @@ CallbackReturn DynamixelHardware::on_configure(const rclcpp_lifecycle::State & /
 CallbackReturn DynamixelHardware::on_deactivate(
   const rclcpp_lifecycle::State & /* previous_state */)
 {
-  RCLCPP_DEBUG(rclcpp::get_logger(kDynamixelHardware), "stop");
   return CallbackReturn::SUCCESS;
 }
 
@@ -308,60 +363,77 @@ return_type DynamixelHardware::read(
     return return_type::OK;
   }
 
-  const char * log = nullptr;
-  std::vector<int32_t> external_positions(info_.joints.size(), 0);
+  // 超高速化: static配列とループ最適化
+  static const char * log = nullptr;
+  static int32_t positions[7] = {0};
+  static int32_t velocities[7] = {0};
+  static uint8_t p_series_ids[2] = {1, 2};  // ID固定（constを削除）
+  static uint8_t x_series_ids[5] = {3, 4, 5, 6, 7};  // ID固定（constを削除）
+  
+  // SyncRead実行（最小限）
+  dynamixel_workbench_.syncRead(0, p_series_ids, 2, &log);
+  dynamixel_workbench_.getSyncReadData(0, p_series_ids, 2, 580, 4, &positions[0], &log);
+  
+  dynamixel_workbench_.syncRead(1, x_series_ids, 5, &log);
+  dynamixel_workbench_.getSyncReadData(1, x_series_ids, 5, 132, 4, &positions[2], &log);
 
-  // 個別Read方式に変更 - 異なる型番のサーボ(PH42/PM54/XM540)に対応
-  for (uint i = 0; i < info_.joints.size(); i++) {
-    int32_t position = 0;
-    int32_t current = 0;
-    
-    // 各サーボから個別に位置情報を読み取り
-    if (!dynamixel_workbench_.itemRead(joint_ids_[i], kPresentPositionItem, &position, &log)) {
-      RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "ID %d position read failed: %s", joint_ids_[i], log);
-      continue;
-    }
-    
-    // 各サーボから個別に電流情報を読み取り
-    if (!dynamixel_workbench_.itemRead(joint_ids_[i], kPresentCurrentItem, &current, &log)) {
-      // Present_Currentが無い場合はPresent_Loadを試行
-      if (!dynamixel_workbench_.itemRead(joint_ids_[i], kPresentLoadItem, &current, &log)) {
-        RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "ID %d current/load read failed: %s", joint_ids_[i], log);
-        current = 0;
-      }
-    }
-    
-    // 位置と電流値を設定
-    joints_[i].state.position = dynamixel_workbench_.convertValue2Radian(joint_ids_[i], position) / mechanical_reductions_[i];
-    joints_[i].state.effort = dynamixel_workbench_.convertValue2Current(current) / mechanical_reductions_[i];
-  }
+  dynamixel_workbench_.syncRead(2, p_series_ids, 2, &log);
+  dynamixel_workbench_.getSyncReadData(2, p_series_ids, 2, 584, 4, &velocities[0], &log);
 
-  // External position handling (if enabled)
-  if (is_external_pos_) {
-    for (uint i = 0; i < info_.joints.size(); i++) {
-      int32_t external_data = 0;
-      if (!dynamixel_workbench_.itemRead(joint_ids_[i], kExternalPortItem, &external_data, &log)) {
-        RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "ID %d external port read failed: %s", joint_ids_[i], log);
-        external_data = 0;
-      }
-      
-      // Apply EMA filter for potentiometer joints to reduce noise
-      if (external_types_[i] == "potential") {
-        external_data = static_cast<int32_t>(adc_filters_[i].update(static_cast<double>(external_data)));
-      }
-      
-      external_positions[i] = external_data;
-    }
+  dynamixel_workbench_.syncRead(3, x_series_ids, 5, &log);
+  dynamixel_workbench_.getSyncReadData(3, x_series_ids, 5, 128, 4, &velocities[2], &log);
 
-    // Apply external position logic
-    for (uint i = 0; i < info_.joints.size(); i++) {
-      // Use external sensor for position based on configuration
-      if (is_external_pos_ && external_types_[i] == "potential") {
-        // Use external potentiometer reading with calibration
-        joints_[i].state.position = convert_external_sensor_to_angle(i, external_positions[i]);
-      }
-      // For joints without external sensors (external_type != "potential"), 
-      // keep using Dynamixel internal position (already set above)
+  // 結果設定最適化（ループ展開＋関数呼び出し削減）
+   static const double inv_reductions[7] = {
+     1.0 / mechanical_reductions_[0], 1.0 / mechanical_reductions_[1], 
+     1.0 / mechanical_reductions_[2], 1.0 / mechanical_reductions_[3],
+     1.0 / mechanical_reductions_[4], 1.0 / mechanical_reductions_[5],
+     1.0 / mechanical_reductions_[6]
+   };
+
+  // ループ展開で高速化
+  joints_[0].state.position = dynamixel_workbench_.convertValue2Radian(1, positions[0]) * inv_reductions[0];
+  joints_[1].state.position = dynamixel_workbench_.convertValue2Radian(2, positions[1]) * inv_reductions[1];
+  joints_[2].state.position = dynamixel_workbench_.convertValue2Radian(3, positions[2]) * inv_reductions[2];
+  joints_[3].state.position = dynamixel_workbench_.convertValue2Radian(4, positions[3]) * inv_reductions[3];  
+  joints_[4].state.position = dynamixel_workbench_.convertValue2Radian(5, positions[4]) * inv_reductions[4];
+  joints_[5].state.position = dynamixel_workbench_.convertValue2Radian(6, positions[5]) * inv_reductions[5];
+  joints_[6].state.position = dynamixel_workbench_.convertValue2Radian(7, positions[6]) * inv_reductions[6];
+  
+  joints_[0].state.velocity = dynamixel_workbench_.convertValue2Velocity(1, velocities[0]) * inv_reductions[0];
+  joints_[1].state.velocity = dynamixel_workbench_.convertValue2Velocity(2, velocities[1]) * inv_reductions[1];
+  joints_[2].state.velocity = dynamixel_workbench_.convertValue2Velocity(3, velocities[2]) * inv_reductions[2];
+  joints_[3].state.velocity = dynamixel_workbench_.convertValue2Velocity(4, velocities[3]) * inv_reductions[3];  
+  joints_[4].state.velocity = dynamixel_workbench_.convertValue2Velocity(5, velocities[4]) * inv_reductions[4];
+  joints_[5].state.velocity = dynamixel_workbench_.convertValue2Velocity(6, velocities[5]) * inv_reductions[5];
+  joints_[6].state.velocity = dynamixel_workbench_.convertValue2Velocity(7, velocities[6]) * inv_reductions[6];
+
+  // velocity/effortは0固定（ループなし）
+  joints_[0].state.effort = joints_[1].state.effort = joints_[2].state.effort = 0.0;
+  joints_[3].state.effort = joints_[4].state.effort = joints_[5].state.effort = 0.0;
+  joints_[6].state.effort = 0.0;
+
+  // 外部IO処理（必要に応じてコメントアウト解除）
+  // if (is_external_pos_) {
+  //   // 外部センサー読み取り処理
+  //   for (uint i = 0; i < info_.joints.size(); i++) {
+  //     if (external_types_[i] == "potential") {
+  //       int32_t external_data = 0;
+  //       if (dynamixel_workbench_.itemRead(joint_ids_[i], kExternalPortItem, &external_data, &log)) {
+  //         external_data = static_cast<int32_t>(adc_filters_[i].update(static_cast<double>(external_data)));
+  //         joints_[i].state.position = convert_external_sensor_to_angle(i, external_data);
+  //       }
+  //     }
+  //   }
+  //   smart_offset_management();
+  // }
+
+  // Backlash compensation: Apply dead band filter to prevent drift accumulation
+  for (size_t i = 0; i < joints_.size(); i++) {
+    double delta = joints_[i].state.position - prev_command_positions_[i];
+    if (std::abs(delta) < BACKLASH_DEAD_BAND) {
+      // Within dead band - likely backlash, use previous command position
+      joints_[i].state.position = prev_command_positions_[i];
     }
   }
 
@@ -389,20 +461,15 @@ return_type DynamixelHardware::write(
     }
   }
 
-  // Check if velocity commands are set (non-zero)
-  bool has_velocity_commands = false;
-  for (const auto& joint : joints_) {
-    if (std::abs(joint.command.velocity) > 1e-6) {
-      has_velocity_commands = true;
-      break;
-    }
+  // Always use velocity control mode to avoid unnecessary mode switching
+  if (joints_.size() > 6 && calibration_data_[6].external_type == "dual_limit"){
+    bool high = read_external_io(calibration_data_[6].external_io_high);
+    bool low = read_external_io(calibration_data_[6].external_io_low);
+    if(high && joints_[6].command.velocity > 0.0) joints_[6].command.velocity = 0.0;
+    if(low  && joints_[6].command.velocity < 0.0) joints_[6].command.velocity = 0.0;
   }
-
-  if (has_velocity_commands) {
-    set_joint_velocities();
-  } else {
-    set_joint_positions();
-  }
+  set_control_mode(ControlMode::Velocity);
+  set_joint_velocities();
   return return_type::OK;
 }
 
@@ -439,26 +506,16 @@ return_type DynamixelHardware::set_control_mode(const ControlMode & mode, const 
   const char * log = nullptr;
   mode_changed_ = false;
 
-  // Check if any joints have custom operating_mode parameters
-  bool has_custom_operating_modes = false;
-  for (uint i = 0; i < info_.joints.size(); ++i) {
-    if (info_.joints[i].parameters.find("operating_mode") != info_.joints[i].parameters.end()) {
-      has_custom_operating_modes = true;
-      break;
-    }
-  }
-
-  // If custom operating modes are set, skip default position control mode setting
-  if (has_custom_operating_modes) {
-    RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), 
-                "Custom operating modes detected, skipping default position control setup");
-    control_mode_ = ControlMode::Position;  // Assume position-based control
-    return return_type::OK;
-  }
-
   if (mode == ControlMode::Position && (force_set || control_mode_ != ControlMode::Position)) {
+    RCLCPP_WARN(rclcpp::get_logger(kDynamixelHardware), 
+                "Control mode change detected! force_set=%s, current_mode=%d", 
+                force_set ? "true" : "false", static_cast<int>(control_mode_));
     bool torque_enabled = torque_enabled_;
     if (torque_enabled) {
+      RCLCPP_WARN(rclcpp::get_logger(kDynamixelHardware), "Torque OFF for control mode change");
+      // Preserve current position before torque off to prevent gravity drop
+      read(rclcpp::Time{}, rclcpp::Duration(0, 0));  // Get latest position
+      reset_command();  // Set command position = current position
       enable_torque(false);
     }
 
@@ -480,10 +537,29 @@ return_type DynamixelHardware::set_control_mode(const ControlMode & mode, const 
     return return_type::OK;
   }
 
-  if (control_mode_ != ControlMode::Position) {
-    RCLCPP_FATAL(
-      rclcpp::get_logger(kDynamixelHardware), "Only position control is implemented");
-    return return_type::ERROR;
+  if (mode == ControlMode::Velocity && (force_set || control_mode_ != ControlMode::Velocity)) {
+    bool torque_enabled = torque_enabled_;
+    if (torque_enabled) {
+      // 重力落下対策：最新位置をコマンドへ反映してからOFF
+      read(rclcpp::Time{}, rclcpp::Duration(0, 0));
+      reset_command();
+      enable_torque(false);
+    }
+    for (uint i = 0; i < joint_ids_.size(); ++i) {
+      if (!dynamixel_workbench_.setVelocityControlMode(joint_ids_[i], &log)) {
+        RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "%s", log);
+        return return_type::ERROR;
+      }
+    }
+    RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), "Velocity control");
+    if (control_mode_ != ControlMode::Velocity) {
+      mode_changed_ = true;
+      control_mode_ = ControlMode::Velocity;
+    }
+    if (torque_enabled) {
+      enable_torque(true);
+    }
+    return return_type::OK;
   }
 
   return return_type::OK;
@@ -503,20 +579,46 @@ return_type DynamixelHardware::reset_command()
 
 CallbackReturn DynamixelHardware::set_joint_positions()
 {
-  const char * log = nullptr;
-
-  // 個別Write方式に変更 - 異なる型番のサーボ(PH42/PM54/XM540)に対応
-  for (uint i = 0; i < info_.joints.size(); i++) {
-    joints_[i].prev_command.position = joints_[i].command.position;
-    
-    // 各サーボへ個別にGoal_Positionを送信
-    int32_t goal_position = dynamixel_workbench_.convertRadian2Value(
-      joint_ids_[i], static_cast<float>(joints_[i].command.position) * mechanical_reductions_[i]);
-    
-    if (!dynamixel_workbench_.itemWrite(joint_ids_[i], kGoalPositionItem, goal_position, &log)) {
-      RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "ID %d goal position write failed: %s", joint_ids_[i], log);
-    }
+  static const char * log = nullptr;
+  static uint8_t p_series_ids[2] = {1, 2};
+  static uint8_t x_series_ids[5] = {3, 4, 5, 6, 7};
+  static int32_t commands[7];
+  
+  // prev_command更新（ループ展開）
+  joints_[0].prev_command.position = joints_[0].command.position;
+  joints_[1].prev_command.position = joints_[1].command.position;
+  joints_[2].prev_command.position = joints_[2].command.position;
+  joints_[3].prev_command.position = joints_[3].command.position;
+  joints_[4].prev_command.position = joints_[4].command.position;
+  joints_[5].prev_command.position = joints_[5].command.position;
+  joints_[6].prev_command.position = joints_[6].command.position;
+  
+  // 目標位置計算（ループ展開）
+  commands[0] = dynamixel_workbench_.convertRadian2Value(1, static_cast<float>(joints_[0].command.position * mechanical_reductions_[0]));
+  commands[1] = dynamixel_workbench_.convertRadian2Value(2, static_cast<float>(joints_[1].command.position * mechanical_reductions_[1]));
+  commands[2] = dynamixel_workbench_.convertRadian2Value(3, static_cast<float>(joints_[2].command.position * mechanical_reductions_[2]));
+  commands[3] = dynamixel_workbench_.convertRadian2Value(4, static_cast<float>(joints_[3].command.position * mechanical_reductions_[3]));
+  commands[4] = dynamixel_workbench_.convertRadian2Value(5, static_cast<float>(joints_[4].command.position * mechanical_reductions_[4]));
+  commands[5] = dynamixel_workbench_.convertRadian2Value(6, static_cast<float>(joints_[5].command.position * mechanical_reductions_[5]));
+  commands[6] = dynamixel_workbench_.convertRadian2Value(7, static_cast<float>(joints_[6].command.position * mechanical_reductions_[6]));
+  
+  // Debug: joint5 command tracking
+  static int debug_count = 0;
+  if (++debug_count % 100 == 0) {  // Every 100 cycles
+    RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), 
+                "Joint5 cmd=%.3f, prev=%.3f, dxl_cmd=%d", 
+                joints_[4].command.position, joints_[4].prev_command.position, commands[4]);
   }
+  
+  // SyncWrite実行（2グループ）
+  dynamixel_workbench_.syncWrite(0, p_series_ids, 2, &commands[0], 1, &log);  // P-series (ID1-2)
+  dynamixel_workbench_.syncWrite(1, x_series_ids, 5, &commands[2], 1, &log);  // X-series (ID3-7)
+  
+  // Update previous command positions for backlash compensation
+  for (size_t i = 0; i < joints_.size(); i++) {
+    prev_command_positions_[i] = joints_[i].command.position;
+  }
+  
   return CallbackReturn::SUCCESS;
 }
 
@@ -543,18 +645,20 @@ CallbackReturn DynamixelHardware::set_joint_params()
 
 CallbackReturn DynamixelHardware::set_joint_velocities()
 {
+  static uint32_t vel_error_count = 0;
+  static const uint32_t ERROR_LOG_INTERVAL = 200;
   const char * log = nullptr;
 
-  // 個別Write方式に変更 - 異なる型番のサーボ(PH42/PM54/XM540)に対応
   for (uint i = 0; i < info_.joints.size(); i++) {
     joints_[i].prev_command.velocity = joints_[i].command.velocity;
     
-    // 各サーボへ個別にGoal_Velocityを送信
     int32_t goal_velocity = dynamixel_workbench_.convertVelocity2Value(
-      joint_ids_[i], static_cast<float>(joints_[i].command.velocity) * mechanical_reductions_[i]);
+      joint_ids_[i], static_cast<float>(joints_[i].command.velocity * mechanical_reductions_[i]));
     
     if (!dynamixel_workbench_.itemWrite(joint_ids_[i], kGoalVelocityItem, goal_velocity, &log)) {
-      RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "ID %d goal velocity write failed: %s", joint_ids_[i], log);
+      if (++vel_error_count % ERROR_LOG_INTERVAL == 0) {
+        RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "Velocity write failed %u times", vel_error_count);
+      }
     }
   }
   return CallbackReturn::SUCCESS;
@@ -665,7 +769,7 @@ void DynamixelHardware::restore_multiturn_from_potential()
     return;
   }
   
-  const char* log = nullptr;
+  // const char* log = nullptr;  // unused variable削除
   
   
   // Mark multiturn restoration as completed
@@ -724,6 +828,320 @@ void DynamixelHardware::set_operating_modes()
 //     response->message = "Failed to change torque state";
 //   }
 // }
+
+void DynamixelHardware::calibrate_potential_offsets()
+{
+  if (use_dummy_) {
+    // ダミーモードでは模擬オフセット
+    RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), "Dummy mode: Simulating offset calibration");
+    for (uint i = 0; i < joints_.size(); i++) {
+      if (external_types_[i] == "potential") {
+        // 模擬オフセット（約-0.035 rad = -2度のずれ）
+        potential_offset_map_[i] = -0.035;
+        RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), 
+                    "Joint %d: Dummy offset calibrated: %.3f rad (%.1f deg)", 
+                    i, potential_offset_map_[i], potential_offset_map_[i] * 180.0 / M_PI);
+      }
+    }
+    offsets_calibrated_ = true;
+    RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), 
+                "Offset calibration completed (dummy mode)");
+    return;
+  }
+
+  const char* log = nullptr;
+  RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), "Calibrating potential sensor offsets...");
+  
+  for (uint i = 0; i < joints_.size(); i++) {
+    if (external_types_[i] == "potential") {
+      // 1. potentialセンサーから現在角度を取得
+      int32_t external_data;
+      if (!dynamixel_workbench_.itemRead(joint_ids_[i], "External_Port_Data_1", &external_data, &log)) {
+        RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), 
+                     "Failed to read external sensor for joint %d: %s", i, log);
+        continue;
+      }
+      double potential_angle = convert_external_sensor_to_angle(i, external_data);
+      
+      // 2. DynamixelのPresent_Positionを取得
+      int32_t dxl_raw_position;
+      if (!dynamixel_workbench_.itemRead(joint_ids_[i], "Present_Position", &dxl_raw_position, &log)) {
+        RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), 
+                     "Failed to read Present_Position for joint %d: %s", i, log);
+        continue;
+      }
+      double dynamixel_angle = dynamixel_workbench_.convertValue2Radian(joint_ids_[i], dxl_raw_position) / mechanical_reductions_[i];
+      
+      // 3. オフセット計算（potential基準 - Dynamixel基準）
+      double offset = potential_angle - dynamixel_angle;
+      potential_offset_map_[i] = offset;
+      
+      RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), 
+                  "Joint %d: Offset calibrated - Potential: %.3f rad, Dynamixel: %.3f rad, Offset: %.3f rad (%.1f deg)", 
+                  i, potential_angle, dynamixel_angle, offset, offset * 180.0 / M_PI);
+    }
+  }
+  
+  offsets_calibrated_ = true;
+  last_full_calibration_ = std::chrono::steady_clock::now();
+  
+  // 初期オフセット履歴を設定
+  for (auto& [joint_index, offset] : potential_offset_map_) {
+    offset_history_[joint_index] = offset;
+  }
+  
+  RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), 
+              "Potential sensor offset calibration completed");
+}
+
+double DynamixelHardware::apply_potential_offset(int joint_index, double goal_position)
+{
+  if (!offsets_calibrated_ || external_types_[joint_index] != "potential") {
+    return goal_position;  // オフセット未校正または非potentialジョイント
+  }
+  
+  auto it = potential_offset_map_.find(joint_index);
+  if (it == potential_offset_map_.end()) {
+    return goal_position;  // オフセット情報なし
+  }
+  
+  // MoveItからの目標位置（potential基準）をDynamixel基準に変換
+  double corrected_goal = goal_position - it->second;
+  
+  RCLCPP_DEBUG(rclcpp::get_logger(kDynamixelHardware), 
+               "Joint %d: Goal offset applied - Original: %.3f, Corrected: %.3f, Offset: %.3f", 
+               joint_index, goal_position, corrected_goal, it->second);
+  
+  return corrected_goal;
+}
+
+double DynamixelHardware::get_corrected_dynamixel_position(int joint_index)
+{
+  const char* log = nullptr;
+  
+  // Dynamixelの生のPresent_Positionを取得
+  int32_t dxl_raw_position;
+  if (!dynamixel_workbench_.itemRead(joint_ids_[joint_index], "Present_Position", &dxl_raw_position, &log)) {
+    RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), 
+                 "Failed to read Present_Position for joint %d: %s", joint_index, log);
+    return 0.0;
+  }
+  
+  double dynamixel_angle = dynamixel_workbench_.convertValue2Radian(joint_ids_[joint_index], dxl_raw_position) / mechanical_reductions_[joint_index];
+  
+  // オフセットが校正済みの場合、potential基準に変換
+  if (offsets_calibrated_ && external_types_[joint_index] == "potential") {
+    auto it = potential_offset_map_.find(joint_index);
+    if (it != potential_offset_map_.end()) {
+      return dynamixel_angle + it->second;  // potential基準に変換
+    }
+  }
+  
+  return dynamixel_angle;  // Dynamixel生値
+}
+
+double DynamixelHardware::clamp_to_safe_range(int joint_index, double angle)
+{
+  // Joint-specific safety limits
+  switch (joint_index) {
+    case 1:  // arm_joint_2 (ID:2)
+      // 可動域: 0° ~ -180° (-3.14159 rad)
+      return std::clamp(angle, -M_PI, 0.0);
+      
+    case 2:  // arm_joint_3 (ID:3)
+      // 可動域: 0° ~ 180° (3.14159 rad)
+      return std::clamp(angle, 0.0, M_PI);
+      
+    // 他のジョイントも必要に応じて追加
+    default:
+      return angle;  // 制限なし
+  }
+}
+
+bool DynamixelHardware::is_in_safe_range(int joint_index, double angle)
+{
+  double clamped = clamp_to_safe_range(joint_index, angle);
+  double tolerance = 0.05;  // 3度程度の許容範囲
+  return std::abs(angle - clamped) < tolerance;
+}
+
+void DynamixelHardware::emergency_move_to_safe_position(int joint_index)
+{
+  if (use_dummy_) {
+    RCLCPP_WARN(rclcpp::get_logger(kDynamixelHardware), 
+                "Dummy mode: Simulating emergency move for joint %d", joint_index);
+    return;
+  }
+
+  const char* log = nullptr;
+  
+  // 現在の外部センサー値を取得
+  double current_angle = 0.0;
+  if (external_types_[joint_index] == "potential") {
+    int32_t external_data;
+    if (dynamixel_workbench_.itemRead(joint_ids_[joint_index], "External_Port_Data_1", &external_data, &log)) {
+      current_angle = convert_external_sensor_to_angle(joint_index, external_data);
+    }
+  } else {
+    // Dynamixel位置を使用
+    current_angle = get_corrected_dynamixel_position(joint_index);
+  }
+  
+  // 安全範囲内かチェック
+  if (is_in_safe_range(joint_index, current_angle)) {
+    return;  // 既に安全範囲内
+  }
+  
+  // 最寄りの安全位置を計算
+  double safe_position = clamp_to_safe_range(joint_index, current_angle);
+  
+  RCLCPP_WARN(rclcpp::get_logger(kDynamixelHardware), 
+              "EMERGENCY: Joint %d at unsafe position %.3f rad (%.1f°), moving to safe position %.3f rad (%.1f°)",
+              joint_index, current_angle, current_angle * 180.0 / M_PI,
+              safe_position, safe_position * 180.0 / M_PI);
+  
+  // オフセット補正を適用して安全位置に移動
+  double corrected_safe_position = apply_potential_offset(joint_index, safe_position);
+  
+  // 緊急移動実行
+  int32_t goal_position = dynamixel_workbench_.convertRadian2Value(
+    joint_ids_[joint_index], static_cast<float>(corrected_safe_position) * mechanical_reductions_[joint_index]);
+  
+  if (!dynamixel_workbench_.itemWrite(joint_ids_[joint_index], kGoalPositionItem, goal_position, &log)) {
+    RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), 
+                 "EMERGENCY MOVE FAILED for joint %d: %s", joint_index, log);
+  } else {
+    RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), 
+                "Emergency move completed for joint %d", joint_index);
+  }
+}
+
+void DynamixelHardware::smart_offset_management()
+{
+  if (!offsets_calibrated_) {
+    return;  // まだ初期校正されていない
+  }
+  
+  auto now = std::chrono::steady_clock::now();
+  
+  // 1. 定期的な全体校正チェック（案2の要素）
+  if (now - last_full_calibration_ > FULL_RECALIBRATION_INTERVAL) {
+    RCLCPP_DEBUG(rclcpp::get_logger(kDynamixelHardware), 
+                "Performing periodic full recalibration");
+    full_recalibration();
+    return;
+  }
+  
+  // 2. 即応的偏差チェック（案1の要素）
+  for (uint i = 0; i < joints_.size(); i++) {
+    if (external_types_[i] == "potential") {
+      update_offset_if_needed(i);
+    }
+  }
+}
+
+void DynamixelHardware::update_offset_if_needed(int joint_index)
+{
+  double current_offset = calculate_current_offset(joint_index);
+  
+  auto stored_it = potential_offset_map_.find(joint_index);
+  if (stored_it == potential_offset_map_.end()) {
+    return;  // オフセット未設定
+  }
+  
+  double stored_offset = stored_it->second;
+  double deviation = std::abs(current_offset - stored_offset);
+  
+  // 閾値を超えた偏差を検出
+  if (deviation > OFFSET_DEVIATION_THRESHOLD) {
+    RCLCPP_WARN(rclcpp::get_logger(kDynamixelHardware), 
+                "Joint %d offset deviation detected: %.3f rad (%.1f deg), updating offset from %.3f to %.3f",
+                joint_index, deviation, deviation * 180.0 / M_PI, 
+                stored_offset, current_offset);
+    
+    // オフセット更新（スムージング適用）
+    double smoothing_factor = 0.3;  // 30%の重み
+    double new_offset = stored_offset * (1 - smoothing_factor) + current_offset * smoothing_factor;
+    
+    potential_offset_map_[joint_index] = new_offset;
+    offset_history_[joint_index] = new_offset;
+    
+    RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), 
+                "Joint %d offset updated to %.3f rad (%.1f deg)", 
+                joint_index, new_offset, new_offset * 180.0 / M_PI);
+  }
+}
+
+void DynamixelHardware::full_recalibration()
+{
+  RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), 
+              "Starting full offset recalibration");
+  
+  bool any_changes = false;
+  
+  for (uint i = 0; i < joints_.size(); i++) {
+    if (external_types_[i] == "potential") {
+      double current_offset = calculate_current_offset(i);
+      
+      auto stored_it = potential_offset_map_.find(i);
+      if (stored_it != potential_offset_map_.end()) {
+        double old_offset = stored_it->second;
+        double change = std::abs(current_offset - old_offset);
+        
+        if (change > 0.005) {  // 0.3度以上の変化
+          RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), 
+                      "Joint %d full recalibration: %.3f -> %.3f rad (change: %.3f rad / %.1f deg)",
+                      i, old_offset, current_offset, change, change * 180.0 / M_PI);
+          
+          potential_offset_map_[i] = current_offset;
+          offset_history_[i] = current_offset;
+          any_changes = true;
+        }
+      }
+    }
+  }
+  
+  last_full_calibration_ = std::chrono::steady_clock::now();
+  
+  if (any_changes) {
+    RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), 
+                "Full recalibration completed with updates");
+  } else {
+    RCLCPP_DEBUG(rclcpp::get_logger(kDynamixelHardware), 
+                 "Full recalibration completed - no significant changes");
+  }
+}
+
+double DynamixelHardware::calculate_current_offset(int joint_index)
+{
+  if (use_dummy_) {
+    // ダミーモードでは模擬的な変動
+    return -0.035 + (std::rand() % 10 - 5) * 0.001;  // ±5度のランダム変動
+  }
+  
+  const char* log = nullptr;
+  
+  // 1. potentialセンサーから現在角度を取得
+  int32_t external_data;
+  if (!dynamixel_workbench_.itemRead(joint_ids_[joint_index], "External_Port_Data_1", &external_data, &log)) {
+    RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), 
+                 "Failed to read external sensor for offset calculation: %s", log);
+    return 0.0;
+  }
+  double potential_angle = convert_external_sensor_to_angle(joint_index, external_data);
+  
+  // 2. DynamixelのPresent_Positionを取得
+  int32_t dxl_raw_position;
+  if (!dynamixel_workbench_.itemRead(joint_ids_[joint_index], "Present_Position", &dxl_raw_position, &log)) {
+    RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), 
+                 "Failed to read Present_Position for offset calculation: %s", log);
+    return 0.0;
+  }
+  double dynamixel_angle = dynamixel_workbench_.convertValue2Radian(joint_ids_[joint_index], dxl_raw_position) / mechanical_reductions_[joint_index];
+  
+  // 3. 現在のオフセット計算
+  return potential_angle - dynamixel_angle;
+}
 
 }  // namespace dynamixel_hardware
 
