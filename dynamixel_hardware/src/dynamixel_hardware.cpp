@@ -90,9 +90,6 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
   auto baud_rate = std::stoi(info_.hardware_parameters.at("baud_rate"));
   const char * log = nullptr;
 
-  RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), "usb_port: %s", usb_port.c_str());
-  RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), "baud_rate: %d", baud_rate);
-
   if (!dynamixel_workbench_.init(usb_port.c_str(), baud_rate, &log)) {
     RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "%s", log);
     return CallbackReturn::ERROR;
@@ -305,7 +302,7 @@ return_type DynamixelHardware::write(
   const rclcpp::Duration & period)
 {
   if (use_dummy_) {
-    // === ここを変更：速度コマンドを積分して position を更新（RVizで動くように） ===
+    // for simulation_output
     const double dt = std::max(1e-6, period.seconds());
     for (auto & joint : joints_) {
       joint.prev_command.velocity = joint.command.velocity;
@@ -381,7 +378,6 @@ return_type DynamixelHardware::enable_torque(const bool enabled)
       }
     }
     reset_command();
-    RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), "Torque enabled");
   } else if (!enabled && torque_enabled_) {
     for (uint i = 0; i < info_.joints.size(); ++i) {
       if (!dynamixel_workbench_.torqueOff(joint_ids_[i], &log)) {
@@ -389,7 +385,6 @@ return_type DynamixelHardware::enable_torque(const bool enabled)
         return return_type::ERROR;
       }
     }
-    RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), "Torque disabled");
   }
 
   torque_enabled_ = enabled;
@@ -413,7 +408,6 @@ return_type DynamixelHardware::set_control_mode(const ControlMode & mode, const 
         return return_type::ERROR;
       }
     }
-    RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), "Velocity control");
     if (control_mode_ != ControlMode::Velocity) {
       mode_changed_ = true;
       control_mode_ = ControlMode::Velocity;
@@ -437,7 +431,6 @@ return_type DynamixelHardware::set_control_mode(const ControlMode & mode, const 
         return return_type::ERROR;
       }
     }
-    RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), "Position control");
     if (control_mode_ != ControlMode::Position) {
       mode_changed_ = true;
       control_mode_ = ControlMode::Position;
@@ -523,9 +516,6 @@ CallbackReturn DynamixelHardware::set_joint_params()
           RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "%s", log);
           return CallbackReturn::ERROR;
         }
-        RCLCPP_INFO(
-          rclcpp::get_logger(
-            kDynamixelHardware), "%s set to %d for joint %d", paramName, value, i);
       }
     }
   }
