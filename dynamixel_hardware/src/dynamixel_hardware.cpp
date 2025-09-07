@@ -26,6 +26,33 @@
 #include "hardware_interface/types/hardware_interface_type_values.hpp"
 #include "rclcpp/rclcpp.hpp"
 
+
+
+// X-series (XM540)
+static constexpr uint16_t X_ADDR_PRESENT_POSITION = 132;
+static constexpr uint16_t X_LEN_PRESENT_POSITION  = 4;
+static constexpr uint16_t X_ADDR_PRESENT_VELOCITY = 128;
+static constexpr uint16_t X_LEN_PRESENT_VELOCITY  = 4;
+static constexpr uint16_t X_ADDR_PRESENT_CURRENT = 126;
+static constexpr uint16_t X_LEN_PRESENT_CURRENT  = 2;
+static constexpr uint16_t X_ADDR_CURRENT_LIMIT = 38;
+static constexpr uint16_t X_LEN_CURRENT_LIMIT  = 2;
+static constexpr uint16_t X_ADDR_HARDWARE_ERROR_STATUS = 70;
+static constexpr uint16_t X_LEN_HARDWARE_ERROR_STATUS  = 1;
+
+// P-series (PH42/PM54)
+static constexpr uint16_t P_ADDR_PRESENT_POSITION = 580;
+static constexpr uint16_t P_LEN_PRESENT_POSITION  = 4;
+static constexpr uint16_t P_ADDR_PRESENT_VELOCITY = 576;
+static constexpr uint16_t P_LEN_PRESENT_VELOCITY  = 4;
+static constexpr uint16_t P_ADDR_PRESENT_CURRENT = 574;
+static constexpr uint16_t P_LEN_PRESENT_CURRENT  = 2;
+static constexpr uint16_t P_ADDR_CURRENT_LIMIT = 38;
+static constexpr uint16_t P_LEN_CURRENT_LIMIT  = 2;
+static constexpr uint16_t P_ADDR_HARDWARE_ERROR_STATUS = 518;
+static constexpr uint16_t P_LEN_HARDWARE_ERROR_STATUS  = 1;
+
+
 namespace dynamixel_hardware
 {
 constexpr const char * kDynamixelHardware = "DynamixelHardware";
@@ -208,54 +235,57 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
 
   // SyncReadハンドラー作成
   // Handler 0: P-series (ID1-2)
-  if (!dynamixel_workbench_.addSyncReadHandler(
-      p_series_position->address, p_series_position->data_length, &log)) {
+  if (!dynamixel_workbench_.addSyncReadHandler(P_ADDR_PRESENT_POSITION, P_LEN_PRESENT_POSITION, &log)) {
     RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "P-series SyncRead handler failed: %s", log);
     return CallbackReturn::ERROR;
   }
   
   // Handler 1: X-series (ID3-6)  
-  if (!dynamixel_workbench_.addSyncReadHandler(
-      x_series_position->address, x_series_position->data_length, &log)) {
+  if (!dynamixel_workbench_.addSyncReadHandler(X_ADDR_PRESENT_POSITION, X_LEN_PRESENT_POSITION, &log)) {
     RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "X-series SyncRead handler failed: %s", log);
     return CallbackReturn::ERROR;
   }
 
   // Handler 2: P-series-velocity (ID1-2)  
-  if (!dynamixel_workbench_.addSyncReadHandler(
-      p_series_velocity->address, p_series_velocity->data_length, &log)) {
+  if (!dynamixel_workbench_.addSyncReadHandler(P_ADDR_PRESENT_VELOCITY, P_LEN_PRESENT_VELOCITY, &log)) {
     RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "P-series SyncRead handler failed: %s", log);
     return CallbackReturn::ERROR;
   }
 
   // Handler 3: X-series-velocity (ID3-6)  
-  if (!dynamixel_workbench_.addSyncReadHandler(
-      x_series_velocity->address, x_series_velocity->data_length, &log)) {
+  if (!dynamixel_workbench_.addSyncReadHandler(X_ADDR_PRESENT_VELOCITY, X_LEN_PRESENT_VELOCITY, &log)) {
     RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "X-series SyncRead handler failed: %s", log);
     return CallbackReturn::ERROR;
   }
 
-  // set data_address,lengths 
-  addr_p_cur_ = p_series_current->address; len_p_cur_ = p_series_current->data_length;
-  addr_x_cur_ = x_series_current->address; len_x_cur_ = x_series_current->data_length;
-  addr_p_err_ = p_series_error->address;   len_p_err_ = p_series_error->data_length;
-  addr_x_err_ = x_series_error->address;   len_x_err_ = x_series_error->data_length;
+  // Handler 4: P-series-current (ID1-2)
+  if (!dynamixel_workbench_.addSyncReadHandler(P_ADDR_PRESENT_CURRENT, P_LEN_PRESENT_CURRENT, &log))
+  {
+    RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "P-series SyncRead handler failed: %s", log);
+    return CallbackReturn::ERROR;
+  }
 
-  addr_p_pos_ = p_series_position->address;  len_p_pos_ = p_series_position->data_length;
-  addr_x_pos_ = x_series_position->address;  len_x_pos_ = x_series_position->data_length;
-  addr_p_vel_ = p_series_velocity->address;  len_p_vel_ = p_series_velocity->data_length;
-  addr_x_vel_ = x_series_velocity->address;  len_x_vel_ = x_series_velocity->data_length;
+  // Handler 5: X-series-current (ID3-6)
+  if (!dynamixel_workbench_.addSyncReadHandler(X_ADDR_PRESENT_CURRENT, X_LEN_PRESENT_CURRENT, &log))
+  {
+    RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "X-series SyncRead handler failed: %s", log);
+    return CallbackReturn::ERROR;
+  }
 
-  int next = 4;
-  if (!dynamixel_workbench_.addSyncReadHandler(addr_p_cur_, len_p_cur_, &log))  return CallbackReturn::ERROR;
-  sr_idx_p_cur_ = next++;
-  if (!dynamixel_workbench_.addSyncReadHandler(addr_x_cur_, len_x_cur_, &log))  return CallbackReturn::ERROR;
-  sr_idx_x_cur_ = next++;
-  if (!dynamixel_workbench_.addSyncReadHandler(addr_p_err_, len_p_err_, &log))  return CallbackReturn::ERROR;
-  sr_idx_p_err_ = next++;
-  if (!dynamixel_workbench_.addSyncReadHandler(addr_x_err_, len_x_err_, &log))  return CallbackReturn::ERROR;
-  sr_idx_x_err_ = next++;
-  
+  // Handler 6: P-series-hardware_error_status (ID1-2)
+  if (!dynamixel_workbench_.addSyncReadHandler(P_ADDR_HARDWARE_ERROR_STATUS, P_LEN_HARDWARE_ERROR_STATUS, &log))
+  {
+    RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "P-series SyncRead handler failed: %s", log);
+    return CallbackReturn::ERROR;
+  }
+
+  // Handler 7: X-series-hardware_error_status (ID3-6)
+  if (!dynamixel_workbench_.addSyncReadHandler(X_ADDR_HARDWARE_ERROR_STATUS, X_LEN_HARDWARE_ERROR_STATUS, &log))
+  {
+    RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "X-series SyncRead handler failed: %s", log);
+    return CallbackReturn::ERROR;
+  }
+
 
   // SyncWriteハンドラー作成（Goal_Position用）
   const ControlItem * p_series_goal = dynamixel_workbench_.getItemInfo(joint_ids_[0], kGoalPositionItem);
@@ -333,9 +363,7 @@ std::vector<hardware_interface::StateInterface> DynamixelHardware::export_state_
 std::vector<hardware_interface::CommandInterface> DynamixelHardware::export_command_interfaces()
 {
   std::vector<hardware_interface::CommandInterface> command_interfaces;
-  // 元の順序（URDF順）でエクスポート、データはID順配列から取得
   for (uint i = 0; i < info_.joints.size(); i++) {
-    // info_.joints[i]から関節IDを取得し、対応するデータ配列のインデックスを見つける
     int joint_id = std::stoi(info_.joints[i].parameters.at("id"));
     size_t data_idx = 0;
     for (size_t j = 0; j < joint_ids_.size(); j++) {
@@ -371,7 +399,7 @@ CallbackReturn DynamixelHardware::on_configure(const rclcpp_lifecycle::State & /
   // Safety check: Move dangerous joints to safe positions
   for (uint i = 0; i < joints_.size(); i++) {
     if (external_types_[i] == "potential") {
-      // emergency_move_to_safe_position(i); // ToDo 安全機能の実装
+      // emergency_move_to_safe_position(i); 
     }
   }
   
@@ -406,38 +434,48 @@ return_type DynamixelHardware::read(
 
   // 超高速化: static配列とループ最適化
   static const char * log = nullptr;
-  static int32_t positions[7] = {0};
-  static int32_t velocities[7] = {0};
+  static int32_t positions[7] = {0, 0, 0, 0, 0, 0, 0};
+  static int32_t velocities[7] = {0, 0, 0, 0, 0, 0, 0};
+  static int32_t currents_raw[7] = {0, 0, 0, 0, 0, 0, 0};
+  static int32_t errors_raw[7] = {0, 0, 0, 0, 0, 0, 0};
   static uint8_t p_series_ids[2] = {1, 2};  // ID固定（constを削除）
   static uint8_t x_series_ids[5] = {3, 4, 5, 6, 7};  // ID固定（constを削除）
   
-  // 位置
+// 位置
 dynamixel_workbench_.syncRead(0, p_series_ids, 2, &log);
-dynamixel_workbench_.getSyncReadData(0, p_series_ids, 2, addr_p_pos_, len_p_pos_, &positions[0], &log);
+dynamixel_workbench_.getSyncReadData(0, p_series_ids, 2,
+  P_ADDR_PRESENT_POSITION, P_LEN_PRESENT_POSITION, &positions[0], &log);
 
 dynamixel_workbench_.syncRead(1, x_series_ids, 5, &log);
-dynamixel_workbench_.getSyncReadData(1, x_series_ids, 5, addr_x_pos_, len_x_pos_, &positions[2], &log);
+dynamixel_workbench_.getSyncReadData(1, x_series_ids, 5,
+  X_ADDR_PRESENT_POSITION, X_LEN_PRESENT_POSITION, &positions[2], &log);
 
 // 速度
 dynamixel_workbench_.syncRead(2, p_series_ids, 2, &log);
-dynamixel_workbench_.getSyncReadData(2, p_series_ids, 2, addr_p_vel_, len_p_vel_, &velocities[0], &log);
+dynamixel_workbench_.getSyncReadData(2, p_series_ids, 2,
+  P_ADDR_PRESENT_VELOCITY, P_LEN_PRESENT_VELOCITY, &velocities[0], &log);
 
 dynamixel_workbench_.syncRead(3, x_series_ids, 5, &log);
-dynamixel_workbench_.getSyncReadData(3, x_series_ids, 5, addr_x_vel_, len_x_vel_, &velocities[2], &log);
+dynamixel_workbench_.getSyncReadData(3, x_series_ids, 5,
+  X_ADDR_PRESENT_VELOCITY, X_LEN_PRESENT_VELOCITY, &velocities[2], &log);
 
 // 電流
-dynamixel_workbench_.syncRead(sr_idx_p_cur_, p_series_ids, 2, &log);
-dynamixel_workbench_.getSyncReadData(sr_idx_p_cur_, p_series_ids, 2, addr_p_cur_, len_p_cur_, &currents_raw[0], &log);
+dynamixel_workbench_.syncRead(4, p_series_ids, 2, &log);
+dynamixel_workbench_.getSyncReadData(4, p_series_ids, 2,
+  P_ADDR_PRESENT_CURRENT, P_LEN_PRESENT_CURRENT, &currents_raw[0], &log);
 
-dynamixel_workbench_.syncRead(sr_idx_x_cur_, x_series_ids, 5, &log);
-dynamixel_workbench_.getSyncReadData(sr_idx_x_cur_, x_series_ids, 5, addr_x_cur_, len_x_cur_, &currents_raw[2], &log);
+dynamixel_workbench_.syncRead(5, x_series_ids, 5, &log);
+dynamixel_workbench_.getSyncReadData(5, x_series_ids, 5,
+  X_ADDR_PRESENT_CURRENT, X_LEN_PRESENT_CURRENT, &currents_raw[2], &log);
 
 // エラー
-dynamixel_workbench_.syncRead(sr_idx_p_err_, p_series_ids, 2, &log);
-dynamixel_workbench_.getSyncReadData(sr_idx_p_err_, p_series_ids, 2, addr_p_err_, len_p_err_, &errors_raw[0], &log);
+dynamixel_workbench_.syncRead(6, p_series_ids, 2, &log);
+dynamixel_workbench_.getSyncReadData(6, p_series_ids, 2,
+  P_ADDR_HARDWARE_ERROR_STATUS, P_LEN_HARDWARE_ERROR_STATUS, &errors_raw[0], &log);
 
-dynamixel_workbench_.syncRead(sr_idx_x_err_, x_series_ids, 5, &log);
-dynamixel_workbench_.getSyncReadData(sr_idx_x_err_, x_series_ids, 5, addr_x_err_, len_x_err_, &errors_raw[2], &log);
+dynamixel_workbench_.syncRead(7, x_series_ids, 5, &log);
+dynamixel_workbench_.getSyncReadData(7, x_series_ids, 5,
+  X_ADDR_HARDWARE_ERROR_STATUS, X_LEN_HARDWARE_ERROR_STATUS, &errors_raw[2], &log);
 
 
   // 結果設定最適化（ループ展開＋関数呼び出し削減）
