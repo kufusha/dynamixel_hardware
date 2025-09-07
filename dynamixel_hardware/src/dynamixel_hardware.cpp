@@ -21,6 +21,7 @@
 #include <string>
 #include <vector>
 #include <cmath>
+#include <cmath>
 
 #include "hardware_interface/types/hardware_interface_return_values.hpp"
 #include "hardware_interface/types/hardware_interface_type_values.hpp"
@@ -181,6 +182,7 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
   }
 
   enable_torque(false);
+  set_control_mode(ControlMode::Velocity, true);
   set_operating_modes();  // Extended Position Control設定 (先に実行)
   set_joint_params();
 
@@ -442,12 +444,15 @@ return_type DynamixelHardware::read(
 
 return_type DynamixelHardware::write(
   const rclcpp::Time & /* time */,
-  const rclcpp::Duration & /* period */)
+  const rclcpp::Duration & period)
 {
   if (use_dummy_) {
+    // for simulation_output
+    const double dt = std::max(1e-6, period.seconds());
     for (auto & joint : joints_) {
-      joint.prev_command.position = joint.command.position;
-      joint.state.position = joint.command.position;
+      joint.prev_command.velocity = joint.command.velocity;
+      joint.state.velocity = joint.command.velocity;
+      joint.state.position += joint.command.velocity * dt;
     }
     return return_type::OK;
   }
@@ -484,6 +489,7 @@ return_type DynamixelHardware::enable_torque(const bool enabled)
         return return_type::ERROR;
       }
     }
+    reset_command();
     // Don't reset command during torque enable to avoid unexpected movement
     // reset_command();
     RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), "Torque enabled");
@@ -494,7 +500,6 @@ return_type DynamixelHardware::enable_torque(const bool enabled)
         return return_type::ERROR;
       }
     }
-    RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), "Torque disabled");
   }
 
   torque_enabled_ = enabled;
@@ -505,6 +510,29 @@ return_type DynamixelHardware::set_control_mode(const ControlMode & mode, const 
 {
   const char * log = nullptr;
   mode_changed_ = false;
+
+  if (mode == ControlMode::Velocity && (force_set || control_mode_ != ControlMode::Velocity)) {
+    bool torque_enabled = torque_enabled_;
+    if (torque_enabled) {
+      enable_torque(false);
+    }
+
+    for (uint i = 0; i < joint_ids_.size(); ++i) {
+      if (!dynamixel_workbench_.setVelocityControlMode(joint_ids_[i], &log)) {
+        RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "%s", log);
+        return return_type::ERROR;
+      }
+    }
+    if (control_mode_ != ControlMode::Velocity) {
+      mode_changed_ = true;
+      control_mode_ = ControlMode::Velocity;
+    }
+
+    if (torque_enabled) {
+      enable_torque(true);
+    }
+    return return_type::OK;
+  }
 
   if (mode == ControlMode::Position && (force_set || control_mode_ != ControlMode::Position)) {
     RCLCPP_WARN(rclcpp::get_logger(kDynamixelHardware), 
@@ -525,7 +553,6 @@ return_type DynamixelHardware::set_control_mode(const ControlMode & mode, const 
         return return_type::ERROR;
       }
     }
-    RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), "Position control");
     if (control_mode_ != ControlMode::Position) {
       mode_changed_ = true;
       control_mode_ = ControlMode::Position;
@@ -622,47 +649,6 @@ CallbackReturn DynamixelHardware::set_joint_positions()
   return CallbackReturn::SUCCESS;
 }
 
-
-CallbackReturn DynamixelHardware::set_joint_params()
-{
-  const char * log = nullptr;
-  for (uint i = 0; i < info_.joints.size(); ++i) {
-    for (auto paramName : kExtraJointParameters) {
-      if (info_.joints[i].parameters.find(paramName) != info_.joints[i].parameters.end()) {
-        auto value = std::stoi(info_.joints[i].parameters.at(paramName));
-        if (!dynamixel_workbench_.itemWrite(joint_ids_[i], paramName, value, &log)) {
-          RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "%s", log);
-          return CallbackReturn::ERROR;
-        }
-        RCLCPP_INFO(
-          rclcpp::get_logger(
-            kDynamixelHardware), "%s set to %d for joint %d", paramName, value, i);
-      }
-    }
-  }
-  return CallbackReturn::SUCCESS;
-}
-
-CallbackReturn DynamixelHardware::set_joint_velocities()
-{
-  static uint32_t vel_error_count = 0;
-  static const uint32_t ERROR_LOG_INTERVAL = 200;
-  const char * log = nullptr;
-
-  for (uint i = 0; i < info_.joints.size(); i++) {
-    joints_[i].prev_command.velocity = joints_[i].command.velocity;
-    
-    int32_t goal_velocity = dynamixel_workbench_.convertVelocity2Value(
-      joint_ids_[i], static_cast<float>(joints_[i].command.velocity * mechanical_reductions_[i]));
-    
-    if (!dynamixel_workbench_.itemWrite(joint_ids_[i], kGoalVelocityItem, goal_velocity, &log)) {
-      if (++vel_error_count % ERROR_LOG_INTERVAL == 0) {
-        RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "Velocity write failed %u times", vel_error_count);
-      }
-    }
-  }
-  return CallbackReturn::SUCCESS;
-}
 
 
 double DynamixelHardware::convert_external_sensor_to_angle(int joint_index, int32_t adc_value)
@@ -785,31 +771,46 @@ int DynamixelHardware::calculate_turn_offset(double true_angle, double single_tu
   return static_cast<int>(std::round(angle_diff / (2.0 * M_PI)));
 }
 
-void DynamixelHardware::set_operating_modes()
+CallbackReturn DynamixelHardware::set_operating_modes()
 {
   const char * log = nullptr;
   
   for (uint i = 0; i < info_.joints.size(); ++i) {
-    // operating_modeパラメータが設定されているかチェック
-    auto param_it = info_.joints[i].parameters.find("operating_mode");
-    if (param_it != info_.joints[i].parameters.end()) {
-      int operating_mode = std::stoi(param_it->second);
-      
-      RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), 
-                  "Setting joint %s (ID:%d) to operating mode %d", 
-                  info_.joints[i].name.c_str(), joint_ids_[i], operating_mode);
-      
-      if (!dynamixel_workbench_.setOperatingMode(joint_ids_[i], operating_mode, &log)) {
-        RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), 
-                     "Failed to set operating mode for joint %s: %s", 
-                     info_.joints[i].name.c_str(), log);
-      } else {
-        RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware),
-                    "Successfully set operating mode %d for joint %s", 
-                    operating_mode, info_.joints[i].name.c_str());
+    for (auto paramName : kExtraJointParameters) {
+      if (info_.joints[i].parameters.find(paramName) != info_.joints[i].parameters.end()) {
+        auto value = std::stoi(info_.joints[i].parameters.at(paramName));
+        if (!dynamixel_workbench_.itemWrite(joint_ids_[i], paramName, value, &log)) {
+          RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "%s", log);
+          return CallbackReturn::ERROR;
+        }
+        RCLCPP_INFO(
+          rclcpp::get_logger(
+            kDynamixelHardware), "%s set to %d for joint %d", paramName, value, i);
       }
     }
   }
+  return CallbackReturn::SUCCESS;
+}
+
+CallbackReturn DynamixelHardware::set_joint_velocities()
+{
+  static uint32_t vel_error_count = 0;
+  static const uint32_t ERROR_LOG_INTERVAL = 200;
+  const char * log = nullptr;
+
+  for (uint i = 0; i < info_.joints.size(); i++) {
+    joints_[i].prev_command.velocity = joints_[i].command.velocity;
+    
+    int32_t goal_velocity = dynamixel_workbench_.convertVelocity2Value(
+      joint_ids_[i], static_cast<float>(joints_[i].command.velocity * mechanical_reductions_[i]));
+    
+    if (!dynamixel_workbench_.itemWrite(joint_ids_[i], kGoalVelocityItem, goal_velocity, &log)) {
+      if (++vel_error_count % ERROR_LOG_INTERVAL == 0) {
+        RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "Velocity write failed %u times", vel_error_count);
+      }
+    }
+  }
+  return CallbackReturn::SUCCESS;
 }
 
 // void DynamixelHardware::torque_enable_service_callback(
