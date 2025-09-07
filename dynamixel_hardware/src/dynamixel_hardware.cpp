@@ -241,6 +241,11 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
   addr_p_err_ = p_series_error->address;   len_p_err_ = p_series_error->data_length;
   addr_x_err_ = x_series_error->address;   len_x_err_ = x_series_error->data_length;
 
+  addr_p_pos_ = p_series_position->address;  len_p_pos_ = p_series_position->data_length;
+  addr_x_pos_ = x_series_position->address;  len_x_pos_ = x_series_position->data_length;
+  addr_p_vel_ = p_series_velocity->address;  len_p_vel_ = p_series_velocity->data_length;
+  addr_x_vel_ = x_series_velocity->address;  len_x_vel_ = x_series_velocity->data_length;
+
   int next = 4;
   if (!dynamixel_workbench_.addSyncReadHandler(addr_p_cur_, len_p_cur_, &log))  return CallbackReturn::ERROR;
   sr_idx_p_cur_ = next++;
@@ -406,32 +411,34 @@ return_type DynamixelHardware::read(
   static uint8_t p_series_ids[2] = {1, 2};  // ID固定（constを削除）
   static uint8_t x_series_ids[5] = {3, 4, 5, 6, 7};  // ID固定（constを削除）
   
-  // SyncRead実行（最小限）
-  dynamixel_workbench_.syncRead(0, p_series_ids, 2, &log);
-  dynamixel_workbench_.getSyncReadData(0, p_series_ids, 2, 580, 4, &positions[0], &log);
-  
-  dynamixel_workbench_.syncRead(1, x_series_ids, 5, &log);
-  dynamixel_workbench_.getSyncReadData(1, x_series_ids, 5, 132, 4, &positions[2], &log);
+  // 位置
+dynamixel_workbench_.syncRead(0, p_series_ids, 2, &log);
+dynamixel_workbench_.getSyncReadData(0, p_series_ids, 2, addr_p_pos_, len_p_pos_, &positions[0], &log);
 
-  dynamixel_workbench_.syncRead(2, p_series_ids, 2, &log);
-  dynamixel_workbench_.getSyncReadData(2, p_series_ids, 2, 584, 4, &velocities[0], &log);
+dynamixel_workbench_.syncRead(1, x_series_ids, 5, &log);
+dynamixel_workbench_.getSyncReadData(1, x_series_ids, 5, addr_x_pos_, len_x_pos_, &positions[2], &log);
 
-  dynamixel_workbench_.syncRead(3, x_series_ids, 5, &log);
-  dynamixel_workbench_.getSyncReadData(3, x_series_ids, 5, 128, 4, &velocities[2], &log);
+// 速度
+dynamixel_workbench_.syncRead(2, p_series_ids, 2, &log);
+dynamixel_workbench_.getSyncReadData(2, p_series_ids, 2, addr_p_vel_, len_p_vel_, &velocities[0], &log);
 
-  static int32_t currents_raw[7] = {0};  // 長さは 2 or 4 byte だが int32_t に受けてOK
-  dynamixel_workbench_.syncRead(sr_idx_p_cur_, p_series_ids, 2, &log);
-  dynamixel_workbench_.getSyncReadData(sr_idx_p_cur_, p_series_ids, 2, addr_p_cur_, len_p_cur_, &currents_raw[0], &log);
+dynamixel_workbench_.syncRead(3, x_series_ids, 5, &log);
+dynamixel_workbench_.getSyncReadData(3, x_series_ids, 5, addr_x_vel_, len_x_vel_, &velocities[2], &log);
 
-  dynamixel_workbench_.syncRead(sr_idx_x_cur_, x_series_ids, 5, &log);
-  dynamixel_workbench_.getSyncReadData(sr_idx_x_cur_, x_series_ids, 5, addr_x_cur_, len_x_cur_, &currents_raw[2], &log);
+// 電流
+dynamixel_workbench_.syncRead(sr_idx_p_cur_, p_series_ids, 2, &log);
+dynamixel_workbench_.getSyncReadData(sr_idx_p_cur_, p_series_ids, 2, addr_p_cur_, len_p_cur_, &currents_raw[0], &log);
 
-  static int32_t errors_raw[7] = {0};
-  dynamixel_workbench_.syncRead(sr_idx_p_err_, p_series_ids, 2, &log);
-  dynamixel_workbench_.getSyncReadData(sr_idx_p_err_, p_series_ids, 2, addr_p_err_, len_p_err_, &errors_raw[0], &log);
+dynamixel_workbench_.syncRead(sr_idx_x_cur_, x_series_ids, 5, &log);
+dynamixel_workbench_.getSyncReadData(sr_idx_x_cur_, x_series_ids, 5, addr_x_cur_, len_x_cur_, &currents_raw[2], &log);
 
-  dynamixel_workbench_.syncRead(sr_idx_x_err_, x_series_ids, 5, &log);
-  dynamixel_workbench_.getSyncReadData(sr_idx_x_err_, x_series_ids, 5, addr_x_err_, len_x_err_, &errors_raw[2], &log);
+// エラー
+dynamixel_workbench_.syncRead(sr_idx_p_err_, p_series_ids, 2, &log);
+dynamixel_workbench_.getSyncReadData(sr_idx_p_err_, p_series_ids, 2, addr_p_err_, len_p_err_, &errors_raw[0], &log);
+
+dynamixel_workbench_.syncRead(sr_idx_x_err_, x_series_ids, 5, &log);
+dynamixel_workbench_.getSyncReadData(sr_idx_x_err_, x_series_ids, 5, addr_x_err_, len_x_err_, &errors_raw[2], &log);
+
 
   // 結果設定最適化（ループ展開＋関数呼び出し削減）
    static const double inv_reductions[7] = {

@@ -130,6 +130,13 @@ private:
   uint16_t addr_p_err_ = 0, len_p_err_ = 0;
   uint16_t addr_x_err_ = 0, len_x_err_ = 0;
 
+  uint16_t addr_p_pos_{0}, len_p_pos_{0};
+  uint16_t addr_x_pos_{0}, len_x_pos_{0};
+  uint16_t addr_p_vel_{0}, len_p_vel_{0};
+  uint16_t addr_x_vel_{0}, len_x_vel_{0};
+
+  
+
   // Exponential Moving Average filter for ADC noise reduction
   struct EMAFilter {
     double alpha;
