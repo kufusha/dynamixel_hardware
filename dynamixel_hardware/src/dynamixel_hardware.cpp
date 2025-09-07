@@ -223,7 +223,7 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
 
   // Handler 2: P-series-velocity (ID1-2)  
   if (!dynamixel_workbench_.addSyncReadHandler(
-      x_series_velocity->address, p_series_velocity->data_length, &log)) {
+      p_series_velocity->address, p_series_velocity->data_length, &log)) {
     RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "P-series SyncRead handler failed: %s", log);
     return CallbackReturn::ERROR;
   }
@@ -235,14 +235,21 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
     return CallbackReturn::ERROR;
   }
 
+  // set data_address,lengths 
+  addr_p_cur_ = p_series_current->address; len_p_cur_ = p_series_current->data_length;
+  addr_x_cur_ = x_series_current->address; len_x_cur_ = x_series_current->data_length;
+  addr_p_err_ = p_series_error->address;   len_p_err_ = p_series_error->data_length;
+  addr_x_err_ = x_series_error->address;   len_x_err_ = x_series_error->data_length;
+
+  int next = 4;
   if (!dynamixel_workbench_.addSyncReadHandler(addr_p_cur_, len_p_cur_, &log))  return CallbackReturn::ERROR;
-  sr_idx_p_cur_ = 4;
+  sr_idx_p_cur_ = next++;
   if (!dynamixel_workbench_.addSyncReadHandler(addr_x_cur_, len_x_cur_, &log))  return CallbackReturn::ERROR;
-  sr_idx_x_cur_ = 5;
+  sr_idx_x_cur_ = next++;
   if (!dynamixel_workbench_.addSyncReadHandler(addr_p_err_, len_p_err_, &log))  return CallbackReturn::ERROR;
-  sr_idx_p_err_ = 6;
+  sr_idx_p_err_ = next++;
   if (!dynamixel_workbench_.addSyncReadHandler(addr_x_err_, len_x_err_, &log))  return CallbackReturn::ERROR;
-  sr_idx_x_err_ = 7;
+  sr_idx_x_err_ = next++;
   
 
   // SyncWriteハンドラー作成（Goal_Position用）
@@ -276,11 +283,7 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
     std::fill(current_limits_A_.begin(), current_limits_A_.end(), dummy_current_limit_A_);
   }
 
-  // set data_lengths 
-  addr_p_cur_ = p_series_current->address; len_p_cur_ = p_series_current->data_length;
-  addr_x_cur_ = x_series_current->address; len_x_cur_ = x_series_current->data_length;
-  addr_p_err_ = p_series_error->address;   len_p_err_ = p_series_error->data_length;
-  addr_x_err_ = x_series_error->address;   len_x_err_ = x_series_error->data_length;
+  
 
 
 
@@ -703,6 +706,35 @@ CallbackReturn DynamixelHardware::set_joint_velocities()
     }
   }
   return CallbackReturn::SUCCESS;
+}
+
+void DynamixelHardware::set_operating_modes()
+{
+  const char * log = nullptr;
+
+  for (uint i = 0; i < info_.joints.size(); ++i) {
+    auto it = info_.joints[i].parameters.find("operating_mode");
+    if (it == info_.joints[i].parameters.end()) {
+      continue;
+    }
+
+    int mode = 0;
+    try { mode = std::stoi(it->second); } catch (...) {
+      RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware),
+                   "Invalid operating_mode for joint %s", info_.joints[i].name.c_str());
+      continue;
+    }
+
+    if (!dynamixel_workbench_.setOperatingMode(joint_ids_[i], mode, &log)) {
+      RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware),
+                   "Failed to set operating mode %d for joint %s (ID:%d): %s",
+                   mode, info_.joints[i].name.c_str(), joint_ids_[i], log ? log : "");
+    } else {
+      RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware),
+                  "Operating mode %d set for joint %s (ID:%d)",
+                  mode, info_.joints[i].name.c_str(), joint_ids_[i]);
+    }
+  }
 }
 
 }  // namespace dynamixel_hardware
