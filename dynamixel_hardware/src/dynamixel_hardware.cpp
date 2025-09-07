@@ -53,6 +53,16 @@ static constexpr uint16_t P_ADDR_HARDWARE_ERROR_STATUS = 518;
 static constexpr uint16_t P_LEN_HARDWARE_ERROR_STATUS  = 1;
 
 
+static constexpr uint16_t P_SR_START = P_ADDR_HARDWARE_ERROR_STATUS; // 518
+static constexpr uint16_t P_SR_END   = P_ADDR_PRESENT_POSITION + P_LEN_PRESENT_POSITION - 1; // 580+4-1=583
+static constexpr uint16_t P_SR_LEN   = (P_SR_END - P_SR_START + 1); // 66
+
+static constexpr uint16_t X_SR_START = X_ADDR_HARDWARE_ERROR_STATUS; // 70
+static constexpr uint16_t X_SR_END   = X_ADDR_PRESENT_POSITION + X_LEN_PRESENT_POSITION - 1; // 132+4-1=135
+static constexpr uint16_t X_SR_LEN   = (X_SR_END - X_SR_START + 1); // 66
+
+
+
 namespace dynamixel_hardware
 {
 constexpr const char * kDynamixelHardware = "DynamixelHardware";
@@ -234,54 +244,11 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
   }
 
   // SyncReadハンドラー作成
-  // Handler 0: P-series (ID1-2)
-  if (!dynamixel_workbench_.addSyncReadHandler(P_ADDR_PRESENT_POSITION, P_LEN_PRESENT_POSITION, &log)) {
+  if (!dynamixel_workbench_.addSyncReadHandler(P_SR_START, P_SR_LEN, &log)) {
     RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "P-series SyncRead handler failed: %s", log);
     return CallbackReturn::ERROR;
   }
-  
-  // Handler 1: X-series (ID3-6)  
-  if (!dynamixel_workbench_.addSyncReadHandler(X_ADDR_PRESENT_POSITION, X_LEN_PRESENT_POSITION, &log)) {
-    RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "X-series SyncRead handler failed: %s", log);
-    return CallbackReturn::ERROR;
-  }
-
-  // Handler 2: P-series-velocity (ID1-2)  
-  if (!dynamixel_workbench_.addSyncReadHandler(P_ADDR_PRESENT_VELOCITY, P_LEN_PRESENT_VELOCITY, &log)) {
-    RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "P-series SyncRead handler failed: %s", log);
-    return CallbackReturn::ERROR;
-  }
-
-  // Handler 3: X-series-velocity (ID3-6)  
-  if (!dynamixel_workbench_.addSyncReadHandler(X_ADDR_PRESENT_VELOCITY, X_LEN_PRESENT_VELOCITY, &log)) {
-    RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "X-series SyncRead handler failed: %s", log);
-    return CallbackReturn::ERROR;
-  }
-
-  // Handler 4: P-series-current (ID1-2)
-  if (!dynamixel_workbench_.addSyncReadHandler(P_ADDR_PRESENT_CURRENT, P_LEN_PRESENT_CURRENT, &log))
-  {
-    RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "P-series SyncRead handler failed: %s", log);
-    return CallbackReturn::ERROR;
-  }
-
-  // Handler 5: X-series-current (ID3-6)
-  if (!dynamixel_workbench_.addSyncReadHandler(X_ADDR_PRESENT_CURRENT, X_LEN_PRESENT_CURRENT, &log))
-  {
-    RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "X-series SyncRead handler failed: %s", log);
-    return CallbackReturn::ERROR;
-  }
-
-  // Handler 6: P-series-hardware_error_status (ID1-2)
-  if (!dynamixel_workbench_.addSyncReadHandler(P_ADDR_HARDWARE_ERROR_STATUS, P_LEN_HARDWARE_ERROR_STATUS, &log))
-  {
-    RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "P-series SyncRead handler failed: %s", log);
-    return CallbackReturn::ERROR;
-  }
-
-  // Handler 7: X-series-hardware_error_status (ID3-6)
-  if (!dynamixel_workbench_.addSyncReadHandler(X_ADDR_HARDWARE_ERROR_STATUS, X_LEN_HARDWARE_ERROR_STATUS, &log))
-  {
+  if (!dynamixel_workbench_.addSyncReadHandler(X_SR_START, X_SR_LEN, &log)) {
     RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "X-series SyncRead handler failed: %s", log);
     return CallbackReturn::ERROR;
   }
@@ -441,40 +408,38 @@ return_type DynamixelHardware::read(
   static uint8_t p_series_ids[2] = {1, 2};  // ID固定（constを削除）
   static uint8_t x_series_ids[5] = {3, 4, 5, 6, 7};  // ID固定（constを削除）
   
-// 位置
+// ---- P series ----
 dynamixel_workbench_.syncRead(0, p_series_ids, 2, &log);
+
+// 位置
 dynamixel_workbench_.getSyncReadData(0, p_series_ids, 2,
   P_ADDR_PRESENT_POSITION, P_LEN_PRESENT_POSITION, &positions[0], &log);
 
+// 速度
+dynamixel_workbench_.getSyncReadData(0, p_series_ids, 2,
+  P_ADDR_PRESENT_VELOCITY, P_LEN_PRESENT_VELOCITY, &velocities[0], &log);
+
+// 電流
+dynamixel_workbench_.getSyncReadData(0, p_series_ids, 2,
+  P_ADDR_PRESENT_CURRENT, P_LEN_PRESENT_CURRENT, &currents_raw[0], &log);
+
+// エラー
+dynamixel_workbench_.getSyncReadData(0, p_series_ids, 2,
+  P_ADDR_HARDWARE_ERROR_STATUS, P_LEN_HARDWARE_ERROR_STATUS, &errors_raw[0], &log);
+
+// ---- X series ----
 dynamixel_workbench_.syncRead(1, x_series_ids, 5, &log);
+
 dynamixel_workbench_.getSyncReadData(1, x_series_ids, 5,
   X_ADDR_PRESENT_POSITION, X_LEN_PRESENT_POSITION, &positions[2], &log);
 
-// 速度
-dynamixel_workbench_.syncRead(2, p_series_ids, 2, &log);
-dynamixel_workbench_.getSyncReadData(2, p_series_ids, 2,
-  P_ADDR_PRESENT_VELOCITY, P_LEN_PRESENT_VELOCITY, &velocities[0], &log);
-
-dynamixel_workbench_.syncRead(3, x_series_ids, 5, &log);
-dynamixel_workbench_.getSyncReadData(3, x_series_ids, 5,
+dynamixel_workbench_.getSyncReadData(1, x_series_ids, 5,
   X_ADDR_PRESENT_VELOCITY, X_LEN_PRESENT_VELOCITY, &velocities[2], &log);
 
-// 電流
-dynamixel_workbench_.syncRead(4, p_series_ids, 2, &log);
-dynamixel_workbench_.getSyncReadData(4, p_series_ids, 2,
-  P_ADDR_PRESENT_CURRENT, P_LEN_PRESENT_CURRENT, &currents_raw[0], &log);
-
-dynamixel_workbench_.syncRead(5, x_series_ids, 5, &log);
-dynamixel_workbench_.getSyncReadData(5, x_series_ids, 5,
+dynamixel_workbench_.getSyncReadData(1, x_series_ids, 5,
   X_ADDR_PRESENT_CURRENT, X_LEN_PRESENT_CURRENT, &currents_raw[2], &log);
 
-// エラー
-dynamixel_workbench_.syncRead(6, p_series_ids, 2, &log);
-dynamixel_workbench_.getSyncReadData(6, p_series_ids, 2,
-  P_ADDR_HARDWARE_ERROR_STATUS, P_LEN_HARDWARE_ERROR_STATUS, &errors_raw[0], &log);
-
-dynamixel_workbench_.syncRead(7, x_series_ids, 5, &log);
-dynamixel_workbench_.getSyncReadData(7, x_series_ids, 5,
+dynamixel_workbench_.getSyncReadData(1, x_series_ids, 5,
   X_ADDR_HARDWARE_ERROR_STATUS, X_LEN_HARDWARE_ERROR_STATUS, &errors_raw[2], &log);
 
 
