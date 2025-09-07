@@ -112,16 +112,24 @@ private:
   std::vector<double> prev_command_positions_;  // Previous command positions for dead band filtering
   static constexpr double BACKLASH_DEAD_BAND = 0.02;  // ~1.1 degrees in radians
   
-  // Offset management for potential sensor joints
-  std::map<int, double> potential_offset_map_;  // joint_index -> offset value
-  bool offsets_calibrated_{false};
-  
-  // Hybrid offset management
-  std::map<int, double> offset_history_;  // For deviation tracking
-  std::chrono::steady_clock::time_point last_full_calibration_;
-  static constexpr double OFFSET_DEVIATION_THRESHOLD = 0.02;  // 1.1度の閾値
-  static constexpr std::chrono::seconds FULL_RECALIBRATION_INTERVAL{10};  // 10秒間隔
-  
+  std::vector<double> present_currents_A_;
+  std::vector<double> current_limits_A_;
+  std::vector<uint8_t> hw_error_bits_;
+  std::vector<double>  hw_error_code_; 
+
+  // Simulation_values when usb_dummy is ture
+  double dummy_current_limit_A_ = 3.0;
+  double dummy_current_slope_A_per_rad_s_ = 0.6;
+
+  // Syncread handler
+  int sr_idx_p_cur_ = -1, sr_idx_x_cur_ = -1;
+  int sr_idx_p_err_ = -1, sr_idx_x_err_ = -1;
+
+  uint16_t addr_p_cur_ = 0, len_p_cur_ = 0;
+  uint16_t addr_x_cur_ = 0, len_x_cur_ = 0;
+  uint16_t addr_p_err_ = 0, len_p_err_ = 0;
+  uint16_t addr_x_err_ = 0, len_x_err_ = 0;
+
   // Exponential Moving Average filter for ADC noise reduction
   struct EMAFilter {
     double alpha;

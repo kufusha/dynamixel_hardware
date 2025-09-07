@@ -40,6 +40,8 @@ constexpr const char * kPresentVelocityItem = "Present_Velocity";
 constexpr const char * kPresentCurrentItem = "Present_Current";
 constexpr const char * kPresentLoadItem = "Present_Load";
 constexpr const char * kExternalPortItem = "External_Port_Data_1";
+constexpr const char * kCurrentLimitItem = "Current_Limit"; // 電流制限値
+constexpr const char * kHardwareErrorStatusItem = "Hardware_Error_Status"; // HWエラーステータス(1bit)
 constexpr const char * const kExtraJointParameters[] = {
   "Profile_Velocity",
   "Profile_Acceleration",
@@ -50,18 +52,29 @@ constexpr const char * const kExtraJointParameters[] = {
   "Velocity_I_Gain",
 };
 
+constexpr const char * IF_PRESENT_CURRENT = "present_current";
+constexpr const char * IF_CURRENT_LIMIT   = "current_limit";
+constexpr const char * IF_HW_ERROR        = "hardware_error"; 
+
 CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo & info)
 {
   if (hardware_interface::SystemInterface::on_init(info) != CallbackReturn::SUCCESS) {
     return CallbackReturn::ERROR;
   }
 
+
+  // Init Variables
   joints_.resize(info_.joints.size(), Joint());
   joint_ids_.resize(info_.joints.size(), 0);
   mechanical_reductions_.resize(info_.joints.size(), 1.0);
   external_types_.resize(info_.joints.size(), "none");
   adc_filters_.resize(info_.joints.size(), EMAFilter(0.2));  // α=0.2 for moderate filtering
   prev_command_positions_.resize(info_.joints.size(), 0.0);  // Initialize previous command positions
+  present_currents_A_.resize(info_.joints.size(), std::numeric_limits<double>::quiet_NaN());
+  current_limits_A_.resize(info_.joints.size(), std::numeric_limits<double>::quiet_NaN());
+  hw_error_bits_.resize(info_.joints.size(), 0);
+  hw_error_code_.resize(info_.joints.size(), 0.0);
+
 
   // Create ID-sorted index mapping to ensure joints are processed in ID order
   std::vector<std::pair<int, size_t>> id_index_pairs;
@@ -99,6 +112,21 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
   {
     use_dummy_ = true;
     RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware), "dummy mode");
+
+    std::fill(present_currents_A_.begin(), present_currents_A_.end(), 0.0);
+    std::fill(hw_error_bits_.begin(),       hw_error_bits_.end(),       0);
+    std::fill(hw_error_code_.begin(),       hw_error_code_.end(),       0.0);
+
+    for (size_t i = 0; i < info_.joints.size(); ++i) {
+      double limA = dummy_current_limit_A_;  // 例: 3.0A（既定値）
+      auto it = info_.joints[i].parameters.find("current_limit_A");
+      if (it != info_.joints[i].parameters.end()) {
+        try { limA = std::stod(it->second); } catch (...) {}
+      }
+      current_limits_A_[i] = limA;
+    }
+
+
     return CallbackReturn::SUCCESS;
   }
 
@@ -145,6 +173,16 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
     RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "P-series Present_Velocity not found");
     return CallbackReturn::ERROR;
   }
+  const ControlItem * p_series_current = dynamixel_workbench_.getItemInfo(joint_ids_[0], kPresentCurrentItem);
+  if (p_series_current == nullptr){
+    RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "P-series Present_Current not found");
+    return CallbackReturn::ERROR;
+  }
+  const ControlItem * p_series_error = dynamixel_workbench_.getItemInfo(joint_ids_[0], kHardwareErrorStatusItem);
+  if (p_series_error == nullptr){
+    RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "P-series Error_States not found");
+    return CallbackReturn::ERROR;
+  }
   
   // Group 2: XM540 (ID3-6) - Xシリーズテーブル  
   const ControlItem * x_series_position = dynamixel_workbench_.getItemInfo(joint_ids_[2], kPresentPositionItem);
@@ -157,7 +195,16 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
     RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "X-series Present_Velocity not found");
     return CallbackReturn::ERROR;
   }
-
+  const ControlItem * x_series_current = dynamixel_workbench_.getItemInfo(joint_ids_[2], kPresentCurrentItem);
+  if (x_series_current == nullptr) {
+    RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "X-series Present_Current not found");
+    return CallbackReturn::ERROR;
+  }
+  const ControlItem * x_series_error = dynamixel_workbench_.getItemInfo(joint_ids_[2], kHardwareErrorStatusItem);
+  if (x_series_error == nullptr) {
+    RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "X-series Error_States not found");
+    return CallbackReturn::ERROR;
+  }
 
   // SyncReadハンドラー作成
   // Handler 0: P-series (ID1-2)
@@ -188,6 +235,16 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
     return CallbackReturn::ERROR;
   }
 
+  if (!dynamixel_workbench_.addSyncReadHandler(addr_p_cur_, len_p_cur_, &log))  return CallbackReturn::ERROR;
+  sr_idx_p_cur_ = 4;
+  if (!dynamixel_workbench_.addSyncReadHandler(addr_x_cur_, len_x_cur_, &log))  return CallbackReturn::ERROR;
+  sr_idx_x_cur_ = 5;
+  if (!dynamixel_workbench_.addSyncReadHandler(addr_p_err_, len_p_err_, &log))  return CallbackReturn::ERROR;
+  sr_idx_p_err_ = 6;
+  if (!dynamixel_workbench_.addSyncReadHandler(addr_x_err_, len_x_err_, &log))  return CallbackReturn::ERROR;
+  sr_idx_x_err_ = 7;
+  
+
   // SyncWriteハンドラー作成（Goal_Position用）
   const ControlItem * p_series_goal = dynamixel_workbench_.getItemInfo(joint_ids_[0], kGoalPositionItem);
   const ControlItem * x_series_goal = dynamixel_workbench_.getItemInfo(joint_ids_[2], kGoalPositionItem);
@@ -203,6 +260,29 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
     RCLCPP_FATAL(rclcpp::get_logger(kDynamixelHardware), "X-series SyncWrite handler failed: %s", log);
     return CallbackReturn::ERROR;
   }
+
+  if (!use_dummy_) {
+    for (size_t i = 0; i < joint_ids_.size(); ++i) {
+      int32_t raw = 0;
+      if (dynamixel_workbench_.itemRead(joint_ids_[i], kCurrentLimitItem, &raw, &log)) {
+        current_limits_A_[i] = dynamixel_workbench_.convertValue2Current(joint_ids_[i], raw);
+      } else {
+        RCLCPP_WARN(rclcpp::get_logger(kDynamixelHardware),
+                    "Current_Limit read failed for ID %d: %s", joint_ids_[i], log ? log : "");
+        current_limits_A_[i] = std::numeric_limits<double>::quiet_NaN();
+      }
+    }
+  } else {
+    std::fill(current_limits_A_.begin(), current_limits_A_.end(), dummy_current_limit_A_);
+  }
+
+  // set data_lengths 
+  addr_p_cur_ = p_series_current->address; len_p_cur_ = p_series_current->data_length;
+  addr_x_cur_ = x_series_current->address; len_x_cur_ = x_series_current->data_length;
+  addr_p_err_ = p_series_error->address;   len_p_err_ = p_series_error->data_length;
+  addr_x_err_ = x_series_error->address;   len_x_err_ = x_series_error->data_length;
+
+
 
   return CallbackReturn::SUCCESS;
 }
@@ -222,7 +302,6 @@ std::vector<hardware_interface::StateInterface> DynamixelHardware::export_state_
         break;
       }
     }
-
     
     state_interfaces.emplace_back(
       hardware_interface::StateInterface(
@@ -233,6 +312,11 @@ std::vector<hardware_interface::StateInterface> DynamixelHardware::export_state_
     state_interfaces.emplace_back(
       hardware_interface::StateInterface(
         info_.joints[i].name, hardware_interface::HW_IF_EFFORT, &joints_[data_idx].state.effort));
+
+    state_interfaces.emplace_back(info_.joints[i].name, IF_PRESENT_CURRENT, &present_currents_A_[data_idx]);
+    state_interfaces.emplace_back(info_.joints[i].name, IF_CURRENT_LIMIT, &current_limits_A_[data_idx]);
+    state_interfaces.emplace_back(info_.joints[i].name, IF_HW_ERROR, &hw_error_code_[data_idx]);
+
   }
 
   return state_interfaces;
@@ -302,6 +386,13 @@ return_type DynamixelHardware::read(
   const rclcpp::Duration & /* period */)
 {
   if (use_dummy_) {
+    for (size_t i = 0; i < joints_.size(); ++i) {
+      const double v = std::isfinite(joints_[i].state.velocity) ? joints_[i].state.velocity : 0.0;
+      const double limit = std::isfinite(current_limits_A_[i]) ? current_limits_A_[i] : dummy_current_limit_A_;
+      present_currents_A_[i] = std::min(limit, std::abs(v) * dummy_current_slope_A_per_rad_s_);
+      hw_error_bits_[i] = 0;
+      hw_error_code_[i] = 0.0;
+    }
     return return_type::OK;
   }
 
@@ -324,6 +415,20 @@ return_type DynamixelHardware::read(
 
   dynamixel_workbench_.syncRead(3, x_series_ids, 5, &log);
   dynamixel_workbench_.getSyncReadData(3, x_series_ids, 5, 128, 4, &velocities[2], &log);
+
+  static int32_t currents_raw[7] = {0};  // 長さは 2 or 4 byte だが int32_t に受けてOK
+  dynamixel_workbench_.syncRead(sr_idx_p_cur_, p_series_ids, 2, &log);
+  dynamixel_workbench_.getSyncReadData(sr_idx_p_cur_, p_series_ids, 2, addr_p_cur_, len_p_cur_, &currents_raw[0], &log);
+
+  dynamixel_workbench_.syncRead(sr_idx_x_cur_, x_series_ids, 5, &log);
+  dynamixel_workbench_.getSyncReadData(sr_idx_x_cur_, x_series_ids, 5, addr_x_cur_, len_x_cur_, &currents_raw[2], &log);
+
+  static int32_t errors_raw[7] = {0};
+  dynamixel_workbench_.syncRead(sr_idx_p_err_, p_series_ids, 2, &log);
+  dynamixel_workbench_.getSyncReadData(sr_idx_p_err_, p_series_ids, 2, addr_p_err_, len_p_err_, &errors_raw[0], &log);
+
+  dynamixel_workbench_.syncRead(sr_idx_x_err_, x_series_ids, 5, &log);
+  dynamixel_workbench_.getSyncReadData(sr_idx_x_err_, x_series_ids, 5, addr_x_err_, len_x_err_, &errors_raw[2], &log);
 
   // 結果設定最適化（ループ展開＋関数呼び出し削減）
    static const double inv_reductions[7] = {
@@ -378,6 +483,13 @@ return_type DynamixelHardware::read(
       joints_[i].state.position = prev_command_positions_[i];
     }
   }
+
+  for (size_t k = 0; k < joints_.size(); ++k) {
+    present_currents_A_[k] = dynamixel_workbench_.convertValue2Current(joint_ids_[k], currents_raw[k]);
+    hw_error_bits_[k] = static_cast<uint8_t>(errors_raw[k] & 0xFF);
+    hw_error_code_[k] = static_cast<double>(hw_error_bits_[k]);
+  }
+
 
   return return_type::OK;
 }
