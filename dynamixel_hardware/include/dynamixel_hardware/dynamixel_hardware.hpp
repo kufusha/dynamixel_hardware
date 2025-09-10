@@ -42,24 +42,6 @@ struct JointValue
   double effort{0.0};
 };
 
-struct CalibrationData
-{
-  std::string external_type{"none"};
-  
-  // Simple 2-point calibration for potentiometers
-  double angle_min{-3.14};    // Minimum angle [rad]
-  double adc_min{1024.0};     // ADC value at minimum angle
-  double angle_max{3.14};     // Maximum angle [rad] 
-  double adc_max{3072.0};     // ADC value at maximum angle
-  
-  // Dual limit sensor settings (for ID:7)
-  double high_limit{3.14};         // 正側リミット角度
-  double low_limit{-3.14};         // 負側リミット角度
-  int external_io_high{1};         // High limit用外部I/O番号
-  int external_io_low{2};          // Low limit用外部I/O番号
-  double safety_margin{0.1};
-};
-
 struct Joint
 {
   JointValue state{};
@@ -112,43 +94,12 @@ private:
   CallbackReturn set_joint_velocities();
   CallbackReturn set_joint_params();
   
-  // Calibration functions
-  double convert_external_sensor_to_angle(int joint_index, int32_t raw_value);
-  bool check_proximity_limit(int joint_index, double target_angle);
-  bool read_external_io(int io_number);
-  
-  // Multiturn restoration
-  void restore_multiturn_from_potential();
-  int calculate_turn_offset(double true_angle, double single_turn_angle);
-  
-  // Offset management for potential sensor joints
-  void calibrate_potential_offsets();
-  double apply_potential_offset(int joint_index, double goal_position);
-  double get_corrected_dynamixel_position(int joint_index);
-  
-  // Hybrid offset management
-  void smart_offset_management();
-  void update_offset_if_needed(int joint_index);
-  void full_recalibration();
-  double calculate_current_offset(int joint_index);
-  
-  // Safety functions
-  double clamp_to_safe_range(int joint_index, double angle);
-  bool is_in_safe_range(int joint_index, double angle);
-  void emergency_move_to_safe_position(int joint_index);
-  
-  // Service callbacks
-  // void torque_enable_service_callback(
-  //   const std::shared_ptr<std_srvs::srv::SetBool::Request> request,
-  //   std::shared_ptr<std_srvs::srv::SetBool::Response> response);
-
   DynamixelWorkbench dynamixel_workbench_;
   std::map<const char * const, const ControlItem *> control_items_;
   std::vector<Joint> joints_;
   std::vector<uint8_t> joint_ids_;
   std::vector<double> mechanical_reductions_;
   std::vector<std::string> external_types_;
-  std::vector<CalibrationData> calibration_data_;
   bool torque_enabled_{false};
   ControlMode control_mode_{ControlMode::Position};
   bool mode_changed_{false};
@@ -161,16 +112,31 @@ private:
   std::vector<double> prev_command_positions_;  // Previous command positions for dead band filtering
   static constexpr double BACKLASH_DEAD_BAND = 0.02;  // ~1.1 degrees in radians
   
-  // Offset management for potential sensor joints
-  std::map<int, double> potential_offset_map_;  // joint_index -> offset value
-  bool offsets_calibrated_{false};
+  std::vector<double> present_currents_A_;
+  std::vector<double> current_limits_A_;
+  std::vector<uint8_t> hw_error_bits_;
+  std::vector<double>  hw_error_code_; 
+
+  // Simulation_values when usb_dummy is ture
+  double dummy_current_limit_A_ = 3.0;
+  double dummy_current_slope_A_per_rad_s_ = 0.6;
+
+  // Syncread handler
+  int sr_idx_p_cur_ = -1, sr_idx_x_cur_ = -1;
+  int sr_idx_p_err_ = -1, sr_idx_x_err_ = -1;
+
+  uint16_t addr_p_cur_ = 0, len_p_cur_ = 0;
+  uint16_t addr_x_cur_ = 0, len_x_cur_ = 0;
+  uint16_t addr_p_err_ = 0, len_p_err_ = 0;
+  uint16_t addr_x_err_ = 0, len_x_err_ = 0;
+
+  uint16_t addr_p_pos_{0}, len_p_pos_{0};
+  uint16_t addr_x_pos_{0}, len_x_pos_{0};
+  uint16_t addr_p_vel_{0}, len_p_vel_{0};
+  uint16_t addr_x_vel_{0}, len_x_vel_{0};
+
   
-  // Hybrid offset management
-  std::map<int, double> offset_history_;  // For deviation tracking
-  std::chrono::steady_clock::time_point last_full_calibration_;
-  static constexpr double OFFSET_DEVIATION_THRESHOLD = 0.02;  // 1.1度の閾値
-  static constexpr std::chrono::seconds FULL_RECALIBRATION_INTERVAL{10};  // 10秒間隔
-  
+
   // Exponential Moving Average filter for ADC noise reduction
   struct EMAFilter {
     double alpha;
