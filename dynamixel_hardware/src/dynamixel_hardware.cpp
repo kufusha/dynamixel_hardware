@@ -126,6 +126,8 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
   hw_error_code_.resize(info_.joints.size(), 0.0);
   external_port1_.resize(info_.joints.size(), std::numeric_limits<double>::quiet_NaN());
   external_port2_.resize(info_.joints.size(), std::numeric_limits<double>::quiet_NaN());
+  external_scale_rad_per_count_.resize(info_.joints.size(), std::numeric_limits<double>::quiet_NaN());
+  external_offset_rad_.resize(info_.joints.size(), 0.0);
 
 
   // Create ID-sorted index mapping to ensure joints are processed in ID order
@@ -163,6 +165,27 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
     joints_[i].command.effort = std::numeric_limits<double>::quiet_NaN();
     joints_[i].prev_command.position = joints_[i].command.position;
     joints_[i].prev_command.effort = joints_[i].command.effort;
+
+    // External calc
+    if (info_.joints[orig_idx].parameters.count("angle_min") > 0 &&
+      info_.joints[orig_idx].parameters.count("angle_max") > 0 &&
+      info_.joints[orig_idx].parameters.count("adc_min") > 0 &&
+      info_.joints[orig_idx].parameters.count("adc_max") > 0)
+    {
+      const double a_min = std::stod(info_.joints[orig_idx].parameters.at("angle_min"));
+      const double a_max = std::stod(info_.joints[orig_idx].parameters.at("angle_max"));
+      const double u_min = std::stod(info_.joints[orig_idx].parameters.at("adc_min"));
+      const double u_max = std::stod(info_.joints[orig_idx].parameters.at("adc_max"));
+      const double du = (u_max - u_min);
+
+      if (std::abs(du) > 1e-9) {
+        external_scale_rad_per_count_[i] = (a_max - a_min) / du;
+        external_offset_rad_[i] = a_min - external_scale_rad_per_count_[i] * u_min;
+      } else {
+        RCLCPP_WARN(rclcpp::get_logger(kDynamixelHardware),
+          "Invalid adc range for joint %s", info_.joints[orig_idx].name.c_str());
+      }
+    }
   }
 
   if (
@@ -525,23 +548,30 @@ dynamixel_workbench_.getSyncReadData(1, x_series_ids, 5,
   joints_[3].state.effort = joints_[4].state.effort = joints_[5].state.effort = 0.0;
   joints_[6].state.effort = 0.0;
 
-  // 外部IO処理（必要に応じてコメントアウト解除）
-  // if (is_external_pos_) {
-  //   // 外部センサー読み取り処理
-  //   for (uint i = 0; i < info_.joints.size(); i++) {
-  //     if (external_types_[i] == "potential") {
-  //       int32_t external_data = 0;
-  //       if (dynamixel_workbench_.itemRead(joint_ids_[i], kExternalPortItem, &external_data, &log)) {
-  //         external_data = static_cast<int32_t>(adc_filters_[i].update(static_cast<double>(external_data)));
-  //         joints_[i].state.position = convert_external_sensor_to_angle(i, external_data);
-  //       }
-  //     }
-  //   }
-  //   smart_offset_management();
-  // }
+  if (is_external_pos_ && !use_dummy_) {
+    const double TWO_PI = 2.0 * M_PI;
+    for (size_t i = 0; i < joints_.size(); ++i) {
+      if (external_types_[i] != "potential") continue;
+      if (!std::isfinite(external_scale_rad_per_count_[i])) continue;
+
+      const int32_t raw = static_cast<int32_t>(ext1_raw[i]);
+      const double ext_angle = external_scale_rad_per_count_[i] * static_cast<double>(raw)
+                            + external_offset_rad_[i];
+      const double ref = std::isfinite(prev_command_positions_[i]) ?
+                        prev_command_positions_[i] : joints_[i].state.position;
+
+      const double k = std::round((ref - ext_angle) / TWO_PI);
+      const double fused = ext_angle + k * TWO_PI;
+
+      joints_[i].state.position = fused;
+      prev_command_positions_[i] = fused;
+    }
+  }
+
 
   // Backlash compensation: Apply dead band filter to prevent drift accumulation
   for (size_t i = 0; i < joints_.size(); i++) {
+    if (is_external_pos_ && external_types_[i] == "potential") continue;
     double delta = joints_[i].state.position - prev_command_positions_[i];
     if (std::abs(delta) < BACKLASH_DEAD_BAND) {
       // Within dead band - likely backlash, use previous command position
