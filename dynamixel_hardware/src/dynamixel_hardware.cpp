@@ -39,6 +39,10 @@ static constexpr uint16_t X_ADDR_CURRENT_LIMIT = 38;
 static constexpr uint16_t X_LEN_CURRENT_LIMIT  = 2;
 static constexpr uint16_t X_ADDR_HARDWARE_ERROR_STATUS = 70;
 static constexpr uint16_t X_LEN_HARDWARE_ERROR_STATUS  = 1;
+static constexpr uint16_t X_ADDR_EXTERNAL_PORT_DATA_1 = 152;
+static constexpr uint16_t X_LEN_EXTERNAL_PORT_DATA_1  = 2;
+static constexpr uint16_t X_ADDR_EXTERNAL_PORT_DATA_2 = 154;
+static constexpr uint16_t X_LEN_EXTERNAL_PORT_DATA_2  = 2;
 
 // P-series (PH42/PM54)
 static constexpr uint16_t P_ADDR_PRESENT_POSITION = 580;
@@ -51,15 +55,19 @@ static constexpr uint16_t P_ADDR_CURRENT_LIMIT = 38;
 static constexpr uint16_t P_LEN_CURRENT_LIMIT  = 2;
 static constexpr uint16_t P_ADDR_HARDWARE_ERROR_STATUS = 518;
 static constexpr uint16_t P_LEN_HARDWARE_ERROR_STATUS  = 1;
+static constexpr uint16_t P_ADDR_EXTERNAL_PORT_DATA_1 = 600;
+static constexpr uint16_t P_LEN_EXTERNAL_PORT_DATA_1  = 2;
+static constexpr uint16_t P_ADDR_EXTERNAL_PORT_DATA_2 = 602;
+static constexpr uint16_t P_LEN_EXTERNAL_PORT_DATA_2  = 2;
 
 
 static constexpr uint16_t P_SR_START = P_ADDR_HARDWARE_ERROR_STATUS; // 518
-static constexpr uint16_t P_SR_END   = P_ADDR_PRESENT_POSITION + P_LEN_PRESENT_POSITION - 1; // 580+4-1=583
-static constexpr uint16_t P_SR_LEN   = (P_SR_END - P_SR_START + 1); // 66
+static constexpr uint16_t P_SR_END   = P_ADDR_EXTERNAL_PORT_DATA_2 + P_LEN_EXTERNAL_PORT_DATA_2 - 1;
+static constexpr uint16_t P_SR_LEN   = (P_SR_END - P_SR_START + 1);
 
 static constexpr uint16_t X_SR_START = X_ADDR_HARDWARE_ERROR_STATUS; // 70
-static constexpr uint16_t X_SR_END   = X_ADDR_PRESENT_POSITION + X_LEN_PRESENT_POSITION - 1; // 132+4-1=135
-static constexpr uint16_t X_SR_LEN   = (X_SR_END - X_SR_START + 1); // 66
+static constexpr uint16_t X_SR_END   = X_ADDR_EXTERNAL_PORT_DATA_2 + X_LEN_EXTERNAL_PORT_DATA_2 - 1;
+static constexpr uint16_t X_SR_LEN   = (X_SR_END - X_SR_START + 1);
 
 
 
@@ -76,9 +84,10 @@ constexpr const char * kPresentPositionItem = "Present_Position";
 constexpr const char * kPresentVelocityItem = "Present_Velocity";
 constexpr const char * kPresentCurrentItem = "Present_Current";
 constexpr const char * kPresentLoadItem = "Present_Load";
-constexpr const char * kExternalPortItem = "External_Port_Data_1";
-constexpr const char * kCurrentLimitItem = "Current_Limit"; // 電流制限値
-constexpr const char * kHardwareErrorStatusItem = "Hardware_Error_Status"; // HWエラーステータス(1bit)
+constexpr const char * kExternalPortItem_1 = "External_Port_Data_1";
+constexpr const char * kExternalPortItem_2 = "External_Port_Data_2";
+constexpr const char * kCurrentLimitItem = "Current_Limit";
+constexpr const char * kHardwareErrorStatusItem = "Hardware_Error_Status";
 constexpr const char * const kExtraJointParameters[] = {
   "Profile_Velocity",
   "Profile_Acceleration",
@@ -91,7 +100,11 @@ constexpr const char * const kExtraJointParameters[] = {
 
 constexpr const char * IF_PRESENT_CURRENT = "present_current";
 constexpr const char * IF_CURRENT_LIMIT   = "current_limit";
-constexpr const char * IF_HW_ERROR        = "hardware_error"; 
+constexpr const char * IF_HW_ERROR        = "hardware_error";
+
+constexpr const char * IF_EXTERNAL_TYPE = "external_type";
+constexpr const char * IF_EXT_PORT1 = "external_port_data_1";
+constexpr const char * IF_EXT_PORT2 = "external_port_data_2";
 
 CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo & info)
 {
@@ -111,6 +124,10 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
   current_limits_A_.resize(info_.joints.size(), std::numeric_limits<double>::quiet_NaN());
   hw_error_bits_.resize(info_.joints.size(), 0);
   hw_error_code_.resize(info_.joints.size(), 0.0);
+  external_port1_.resize(info_.joints.size(), std::numeric_limits<double>::quiet_NaN());
+  external_port2_.resize(info_.joints.size(), std::numeric_limits<double>::quiet_NaN());
+  external_scale_rad_per_count_.resize(info_.joints.size(), std::numeric_limits<double>::quiet_NaN());
+  external_offset_rad_.resize(info_.joints.size(), 0.0);
 
 
   // Create ID-sorted index mapping to ensure joints are processed in ID order
@@ -131,16 +148,44 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
 
   for (uint i = 0; i < info_.joints.size(); i++) {
     size_t orig_idx = id_sorted_indices_[i];
+    
     joint_ids_[i] = std::stoi(info_.joints[orig_idx].parameters.at("id"));
+    
     if (info_.joints[orig_idx].parameters.count("mechanical_reduction") > 0) {
       mechanical_reductions_[i] = std::stof(info_.joints[orig_idx].parameters.at("mechanical_reduction"));
     }
+
+    if (info_.joints[orig_idx].parameters.count("external_type") > 0) {
+      external_types_[i] = info_.joints[orig_idx].parameters.at("external_type");
+    }
+
     joints_[i].state.position = std::numeric_limits<double>::quiet_NaN();
     joints_[i].state.effort = std::numeric_limits<double>::quiet_NaN();
     joints_[i].command.position = std::numeric_limits<double>::quiet_NaN();
     joints_[i].command.effort = std::numeric_limits<double>::quiet_NaN();
     joints_[i].prev_command.position = joints_[i].command.position;
     joints_[i].prev_command.effort = joints_[i].command.effort;
+
+    // External calc
+    if (info_.joints[orig_idx].parameters.count("angle_min") > 0 &&
+      info_.joints[orig_idx].parameters.count("angle_max") > 0 &&
+      info_.joints[orig_idx].parameters.count("adc_min") > 0 &&
+      info_.joints[orig_idx].parameters.count("adc_max") > 0)
+    {
+      const double a_min = std::stod(info_.joints[orig_idx].parameters.at("angle_min"));
+      const double a_max = std::stod(info_.joints[orig_idx].parameters.at("angle_max"));
+      const double u_min = std::stod(info_.joints[orig_idx].parameters.at("adc_min"));
+      const double u_max = std::stod(info_.joints[orig_idx].parameters.at("adc_max"));
+      const double du = (u_max - u_min);
+
+      if (std::abs(du) > 1e-9) {
+        external_scale_rad_per_count_[i] = (a_max - a_min) / du;
+        external_offset_rad_[i] = a_min - external_scale_rad_per_count_[i] * u_min;
+      } else {
+        RCLCPP_WARN(rclcpp::get_logger(kDynamixelHardware),
+          "Invalid adc range for joint %s", info_.joints[orig_idx].name.c_str());
+      }
+    }
   }
 
   if (
@@ -153,6 +198,8 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
     std::fill(present_currents_A_.begin(), present_currents_A_.end(), 0.0);
     std::fill(hw_error_bits_.begin(),       hw_error_bits_.end(),       0);
     std::fill(hw_error_code_.begin(),       hw_error_code_.end(),       0.0);
+    std::fill(external_port1_.begin(), external_port1_.end(), 0.0);
+    std::fill(external_port2_.begin(), external_port2_.end(), 0.0);
 
     for (size_t i = 0; i < info_.joints.size(); ++i) {
       double limA = dummy_current_limit_A_;  // 例: 3.0A（既定値）
@@ -317,7 +364,8 @@ std::vector<hardware_interface::StateInterface> DynamixelHardware::export_state_
     state_interfaces.emplace_back(
       hardware_interface::StateInterface(
         info_.joints[i].name, hardware_interface::HW_IF_EFFORT, &joints_[data_idx].state.effort));
-
+    state_interfaces.emplace_back(info_.joints[i].name, IF_EXT_PORT1, &external_port1_[data_idx]);
+    state_interfaces.emplace_back(info_.joints[i].name, IF_EXT_PORT2, &external_port2_[data_idx]);
     state_interfaces.emplace_back(info_.joints[i].name, IF_PRESENT_CURRENT, &present_currents_A_[data_idx]);
     state_interfaces.emplace_back(info_.joints[i].name, IF_CURRENT_LIMIT, &current_limits_A_[data_idx]);
     state_interfaces.emplace_back(info_.joints[i].name, IF_HW_ERROR, &hw_error_code_[data_idx]);
@@ -347,7 +395,6 @@ std::vector<hardware_interface::CommandInterface> DynamixelHardware::export_comm
       hardware_interface::CommandInterface(
         info_.joints[i].name, hardware_interface::HW_IF_VELOCITY, &joints_[data_idx].command.velocity));
   }
-
   return command_interfaces;
 }
 
@@ -395,6 +442,8 @@ return_type DynamixelHardware::read(
       present_currents_A_[i] = std::min(limit, std::abs(v) * dummy_current_slope_A_per_rad_s_);
       hw_error_bits_[i] = 0;
       hw_error_code_[i] = 0.0;
+      external_port1_[i] = 0.0;
+      external_port2_[i] = 0.0;
     }
     return return_type::OK;
   }
@@ -405,6 +454,10 @@ return_type DynamixelHardware::read(
   static int32_t velocities[7] = {0, 0, 0, 0, 0, 0, 0};
   static int32_t currents_raw[7] = {0, 0, 0, 0, 0, 0, 0};
   static int32_t errors_raw[7] = {0, 0, 0, 0, 0, 0, 0};
+
+  static int32_t ext1_raw[7] = {0};
+  static int32_t ext2_raw[7] = {0};
+
   static uint8_t p_series_ids[2] = {1, 2};  // ID固定（constを削除）
   static uint8_t x_series_ids[5] = {3, 4, 5, 6, 7};  // ID固定（constを削除）
   
@@ -427,20 +480,42 @@ dynamixel_workbench_.getSyncReadData(0, p_series_ids, 2,
 dynamixel_workbench_.getSyncReadData(0, p_series_ids, 2,
   P_ADDR_HARDWARE_ERROR_STATUS, P_LEN_HARDWARE_ERROR_STATUS, &errors_raw[0], &log);
 
+// 外部IO_1
+dynamixel_workbench_.getSyncReadData(0, p_series_ids, 2, 
+  P_ADDR_EXTERNAL_PORT_DATA_1, P_LEN_EXTERNAL_PORT_DATA_1, &ext1_raw[0], &log);
+
+// 外部IO_2
+dynamixel_workbench_.getSyncReadData(0, p_series_ids, 2, 
+  P_ADDR_EXTERNAL_PORT_DATA_2, P_LEN_EXTERNAL_PORT_DATA_2, &ext2_raw[0], &log);
+
+
 // ---- X series ----
 dynamixel_workbench_.syncRead(1, x_series_ids, 5, &log);
 
+// 位置
 dynamixel_workbench_.getSyncReadData(1, x_series_ids, 5,
   X_ADDR_PRESENT_POSITION, X_LEN_PRESENT_POSITION, &positions[2], &log);
 
+// 速度
 dynamixel_workbench_.getSyncReadData(1, x_series_ids, 5,
   X_ADDR_PRESENT_VELOCITY, X_LEN_PRESENT_VELOCITY, &velocities[2], &log);
 
+// 電流
 dynamixel_workbench_.getSyncReadData(1, x_series_ids, 5,
   X_ADDR_PRESENT_CURRENT, X_LEN_PRESENT_CURRENT, &currents_raw[2], &log);
 
+// エラー
 dynamixel_workbench_.getSyncReadData(1, x_series_ids, 5,
   X_ADDR_HARDWARE_ERROR_STATUS, X_LEN_HARDWARE_ERROR_STATUS, &errors_raw[2], &log);
+
+// 外部IO_1
+dynamixel_workbench_.getSyncReadData(1, x_series_ids, 5, 
+  X_ADDR_EXTERNAL_PORT_DATA_1, X_LEN_EXTERNAL_PORT_DATA_1, &ext1_raw[2], &log);
+
+// 外部IO_2
+dynamixel_workbench_.getSyncReadData(1, x_series_ids, 5, 
+  X_ADDR_EXTERNAL_PORT_DATA_2, X_LEN_EXTERNAL_PORT_DATA_2, &ext2_raw[2], &log);
+
 
 
   // 結果設定最適化（ループ展開＋関数呼び出し削減）
@@ -473,23 +548,30 @@ dynamixel_workbench_.getSyncReadData(1, x_series_ids, 5,
   joints_[3].state.effort = joints_[4].state.effort = joints_[5].state.effort = 0.0;
   joints_[6].state.effort = 0.0;
 
-  // 外部IO処理（必要に応じてコメントアウト解除）
-  // if (is_external_pos_) {
-  //   // 外部センサー読み取り処理
-  //   for (uint i = 0; i < info_.joints.size(); i++) {
-  //     if (external_types_[i] == "potential") {
-  //       int32_t external_data = 0;
-  //       if (dynamixel_workbench_.itemRead(joint_ids_[i], kExternalPortItem, &external_data, &log)) {
-  //         external_data = static_cast<int32_t>(adc_filters_[i].update(static_cast<double>(external_data)));
-  //         joints_[i].state.position = convert_external_sensor_to_angle(i, external_data);
-  //       }
-  //     }
-  //   }
-  //   smart_offset_management();
-  // }
+  if (is_external_pos_ && !use_dummy_) {
+    const double TWO_PI = 2.0 * M_PI;
+    for (size_t i = 0; i < joints_.size(); ++i) {
+      if (external_types_[i] != "potential") continue;
+      if (!std::isfinite(external_scale_rad_per_count_[i])) continue;
+
+      const int32_t raw = static_cast<int32_t>(ext1_raw[i]);
+      const double ext_angle = external_scale_rad_per_count_[i] * static_cast<double>(raw)
+                            + external_offset_rad_[i];
+      const double ref = std::isfinite(prev_command_positions_[i]) ?
+                        prev_command_positions_[i] : joints_[i].state.position;
+
+      const double k = std::round((ref - ext_angle) / TWO_PI);
+      const double fused = ext_angle + k * TWO_PI;
+
+      joints_[i].state.position = fused;
+      prev_command_positions_[i] = fused;
+    }
+  }
+
 
   // Backlash compensation: Apply dead band filter to prevent drift accumulation
   for (size_t i = 0; i < joints_.size(); i++) {
+    if (is_external_pos_ && external_types_[i] == "potential") continue;
     double delta = joints_[i].state.position - prev_command_positions_[i];
     if (std::abs(delta) < BACKLASH_DEAD_BAND) {
       // Within dead band - likely backlash, use previous command position
@@ -501,6 +583,9 @@ dynamixel_workbench_.getSyncReadData(1, x_series_ids, 5,
     present_currents_A_[k] = dynamixel_workbench_.convertValue2Current(joint_ids_[k], currents_raw[k]);
     hw_error_bits_[k] = static_cast<uint8_t>(errors_raw[k] & 0xFF);
     hw_error_code_[k] = static_cast<double>(hw_error_bits_[k]);
+
+    external_port1_[k] = static_cast<double>(ext1_raw[k]);
+    external_port2_[k] = static_cast<double>(ext2_raw[k]);
   }
 
 

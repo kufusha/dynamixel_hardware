@@ -115,7 +115,12 @@ private:
   std::vector<double> present_currents_A_;
   std::vector<double> current_limits_A_;
   std::vector<uint8_t> hw_error_bits_;
-  std::vector<double>  hw_error_code_; 
+  std::vector<double>  hw_error_code_;
+  std::vector<double> external_port1_;
+  std::vector<double> external_port2_;
+  
+  std::vector<double> external_scale_rad_per_count_;
+  std::vector<double> external_offset_rad_; 
 
   // Simulation_values when usb_dummy is ture
   double dummy_current_limit_A_ = 3.0;
