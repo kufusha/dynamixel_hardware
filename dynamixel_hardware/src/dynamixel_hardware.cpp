@@ -80,6 +80,7 @@ constexpr uint8_t kPresentPositionCurrentIndex = 0;
 constexpr uint8_t kExternalPortIndex = 1;
 constexpr const char * kGoalPositionItem = "Goal_Position";
 constexpr const char * kGoalVelocityItem = "Goal_Velocity";
+constexpr const char * kGoalCurrentItem  = "Goal_Current";
 constexpr const char * kPresentPositionItem = "Present_Position";
 constexpr const char * kPresentVelocityItem = "Present_Velocity";
 constexpr const char * kPresentCurrentItem = "Present_Current";
@@ -128,6 +129,8 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
   external_port2_.resize(info_.joints.size(), std::numeric_limits<double>::quiet_NaN());
   external_scale_rad_per_count_.resize(info_.joints.size(), std::numeric_limits<double>::quiet_NaN());
   external_offset_rad_.resize(info_.joints.size(), 0.0);
+  operating_modes_.resize(info_.joints.size(), 1);
+  effort_to_current_scale_.resize(info_.joints.size(), 1.0);
 
 
   // Create ID-sorted index mapping to ensure joints are processed in ID order
@@ -186,6 +189,18 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
           "Invalid adc range for joint %s", info_.joints[orig_idx].name.c_str());
       }
     }
+
+    if (info_.joints[orig_idx].parameters.count("effort_scale") > 0) {
+      try {
+        effort_to_current_scale_[i] =
+          std::stod(info_.joints[orig_idx].parameters.at("effort_scale"));
+      } catch (...) {
+        RCLCPP_WARN(rclcpp::get_logger(kDynamixelHardware),
+                   "Invalid effort_scale for joint %s; use 1.0",
+                    info_.joints[orig_idx].name.c_str());
+      }
+    }
+
   }
 
   if (
@@ -394,6 +409,9 @@ std::vector<hardware_interface::CommandInterface> DynamixelHardware::export_comm
     command_interfaces.emplace_back(
       hardware_interface::CommandInterface(
         info_.joints[i].name, hardware_interface::HW_IF_VELOCITY, &joints_[data_idx].command.velocity));
+    command_interfaces.emplace_back(
+      hardware_interface::CommandInterface(
+        info_.joints[i].name, hardware_interface::HW_IF_EFFORT, &joints_[data_idx].command.effort));
   }
   return command_interfaces;
 }
@@ -598,19 +616,54 @@ return_type DynamixelHardware::write(
 {
   if (use_dummy_) {
     const double dt = std::max(1e-6, period.seconds());
-    for (auto & joint : joints_) {
-      joint.prev_command.velocity = joint.command.velocity;
-      joint.state.velocity = joint.command.velocity;
-      joint.state.position += joint.command.velocity * dt;
+    for (size_t i = 0; i < joints_.size(); ++i) {
+      joints_[i].prev_command.velocity = joints_[i].command.velocity;
+      joints_[i].prev_command.effort = joints_[i].command.effort;
+
+      double velocity_cmd = joints_[i].command.velocity;
+      double effort_cmd = joints_[i].command.effort;
+
+      // Dual limit sensor clamping (dummy mode)
+      if (external_types_[i] == "dual_limit") {
+        // Simulate external port states (dummy mode assumes mid-range, not at limits)
+        external_port1_[i] = 1.0; // Not at lower limit
+        external_port2_[i] = 1.0; // Not at upper limit
+
+        // However, clamp commands based on simulated limit detection
+        // You can modify these conditions for testing
+        // if (joints_[i].state.position >= 1.0) { // Simulate upper limit
+        //   if (velocity_cmd > 0) velocity_cmd = 0.0;
+        //   if (effort_cmd > 0) effort_cmd = 0.0;
+        // }
+        // if (joints_[i].state.position <= -1.0) { // Simulate lower limit
+        //   if (velocity_cmd < 0) velocity_cmd = 0.0;
+        //   if (effort_cmd < 0) effort_cmd = 0.0;
+        // }
+      }
+
+      joints_[i].state.velocity = velocity_cmd;
+      joints_[i].state.effort = effort_cmd;
+
+      // Position update: velocity command or effort-based velocity
+      if (std::abs(velocity_cmd) > 1e-6) {
+        // Velocity control mode
+        joints_[i].state.position += velocity_cmd * dt;
+      } else if (std::abs(effort_cmd) > 1e-6) {
+        // Effort control mode: simulate velocity from effort
+        double simulated_velocity = effort_cmd * 0.5; // Simple effort->velocity conversion
+        joints_[i].state.velocity = simulated_velocity;
+        joints_[i].state.position += simulated_velocity * dt;
+      }
     }
     return return_type::OK;
   }
-
-  // Limit check for Hand motor
-  // Limit_detect_function() // ToDo(Sasaki Tiger) create limit function
-
-  set_control_mode(ControlMode::Velocity);
+  
+  // Velocity mode(=1)
   set_joint_velocities();
+  // Current mode(=0)
+  set_joint_currents();
+
+
   return return_type::OK;
 }
 
@@ -789,6 +842,12 @@ CallbackReturn DynamixelHardware::set_joint_velocities()
   const char * log = nullptr;
 
   for (uint i = 0; i < info_.joints.size(); i++) {
+
+    // mode_check
+    if (operating_modes_[i] != 1){
+      continue;
+    }
+
     joints_[i].prev_command.velocity = joints_[i].command.velocity;
 
     // Dual limit sensor velocity clamping
@@ -820,6 +879,59 @@ CallbackReturn DynamixelHardware::set_joint_velocities()
   return CallbackReturn::SUCCESS;
 }
 
+hardware_interface::CallbackReturn DynamixelHardware::set_joint_currents()
+{
+  const char * log = nullptr;
+  static uint32_t cur_error_count = 0;
+  static const uint32_t ERROR_LOG_INTERVAL = 200;
+
+  for (uint i = 0; i < info_.joints.size(); ++i) {
+    // Mode check
+    if (operating_modes_[i] != 0) {
+      continue;
+    }
+
+    double current_A = joints_[i].command.effort * effort_to_current_scale_[i];
+
+    // Dual limit sensor effort/current clamping
+    if (external_types_[i] == "dual_limit") {
+      // data_2=0 (upper limit) -> clamp positive effort/current to 0
+      if (external_port2_[i] == 0 && current_A > 0) {
+        current_A = 0.0;
+      }
+
+      // data_1=0 (lower limit) -> clamp negative effort/current to 0
+      if (external_port1_[i] == 0 && current_A < 0) {
+        current_A = 0.0;
+      }
+    }
+
+    const double limit = std::isfinite(current_limits_A_[i]) ?
+                          current_limits_A_[i] : dummy_current_limit_A_;
+    if (std::isfinite(limit)) {
+      if (current_A >  limit) current_A =  limit;
+      if (current_A < -limit) current_A = -limit;
+    }
+
+    const int32_t goal_current_raw =
+      dynamixel_workbench_.convertCurrent2Value(joint_ids_[i],
+                                                static_cast<float>(current_A));
+
+    if (!dynamixel_workbench_.itemWrite(joint_ids_[i],
+                                        kGoalCurrentItem,
+                                        goal_current_raw, &log)) {
+      if (++cur_error_count % ERROR_LOG_INTERVAL == 0) {
+        RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware),
+                     "Current write failed %u times", cur_error_count);
+      }
+    }
+
+    joints_[i].prev_command.effort = joints_[i].command.effort;
+  }
+
+  return hardware_interface::CallbackReturn::SUCCESS;
+}
+
 void DynamixelHardware::set_operating_modes()
 {
   const char * log = nullptr;
@@ -842,6 +954,7 @@ void DynamixelHardware::set_operating_modes()
                    "Failed to set operating mode %d for joint %s (ID:%d): %s",
                    mode, info_.joints[i].name.c_str(), joint_ids_[i], log ? log : "");
     } else {
+      operating_modes_[i] = mode;
       RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware),
                   "Operating mode %d set for joint %s (ID:%d)",
                   mode, info_.joints[i].name.c_str(), joint_ids_[i]);

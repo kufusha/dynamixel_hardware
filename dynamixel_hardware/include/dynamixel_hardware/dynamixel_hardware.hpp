@@ -53,6 +53,7 @@ enum class ControlMode
 {
   Position,
   Velocity,
+  Effort,
 };
 
 class DynamixelHardware : public hardware_interface::SystemInterface
@@ -93,13 +94,16 @@ private:
   CallbackReturn set_joint_positions();
   CallbackReturn set_joint_velocities();
   CallbackReturn set_joint_params();
+  CallbackReturn set_joint_currents();
   
   DynamixelWorkbench dynamixel_workbench_;
   std::map<const char * const, const ControlItem *> control_items_;
   std::vector<Joint> joints_;
   std::vector<uint8_t> joint_ids_;
+  std::vector<int> operating_modes_;
   std::vector<double> mechanical_reductions_;
   std::vector<std::string> external_types_;
+  std::vector<double> effort_to_current_scale_;
   bool torque_enabled_{false};
   ControlMode control_mode_{ControlMode::Position};
   bool mode_changed_{false};
