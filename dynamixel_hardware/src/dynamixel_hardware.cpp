@@ -790,7 +790,24 @@ CallbackReturn DynamixelHardware::set_joint_velocities()
 
   for (uint i = 0; i < info_.joints.size(); i++) {
     joints_[i].prev_command.velocity = joints_[i].command.velocity;
-    
+
+    // Dual limit sensor velocity clamping
+    if (external_types_[i] == "dual_limit") {
+      double velocity = joints_[i].command.velocity;
+
+      // data_2=0 (upper limit) -> clamp positive velocity to 0
+      if (external_port2_[i] == 0 && velocity > 0) {
+        velocity = 0.0;
+      }
+
+      // data_1=0 (lower limit) -> clamp negative velocity to 0
+      if (external_port1_[i] == 0 && velocity < 0) {
+        velocity = 0.0;
+      }
+
+      joints_[i].command.velocity = velocity;
+    }
+
     int32_t goal_velocity = dynamixel_workbench_.convertVelocity2Value(
       joint_ids_[i], static_cast<float>(joints_[i].command.velocity * mechanical_reductions_[i]));
     
