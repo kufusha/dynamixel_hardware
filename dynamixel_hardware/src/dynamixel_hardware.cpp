@@ -625,20 +625,26 @@ return_type DynamixelHardware::write(
 
       // Dual limit sensor clamping (dummy mode)
       if (external_types_[i] == "dual_limit") {
-        // Simulate external port states (dummy mode assumes mid-range, not at limits)
-        external_port1_[i] = 1.0; // Not at lower limit
-        external_port2_[i] = 1.0; // Not at upper limit
+        // Simulate limit sensor states based on position
+        const double upper_limit = 0.5;  // Gripper fully open
+        const double lower_limit = 0.1; // Gripper fully closed
 
-        // However, clamp commands based on simulated limit detection
-        // You can modify these conditions for testing
-        // if (joints_[i].state.position >= 1.0) { // Simulate upper limit
-        //   if (velocity_cmd > 0) velocity_cmd = 0.0;
-        //   if (effort_cmd > 0) effort_cmd = 0.0;
-        // }
-        // if (joints_[i].state.position <= -1.0) { // Simulate lower limit
-        //   if (velocity_cmd < 0) velocity_cmd = 0.0;
-        //   if (effort_cmd < 0) effort_cmd = 0.0;
-        // }
+        // Simulate limit sensor detection
+        if (joints_[i].state.position >= upper_limit) {
+          external_port2_[i] = 0.0; // Upper limit detected
+          if (velocity_cmd > 0) velocity_cmd = 0.0;
+          if (effort_cmd > 0) effort_cmd = 0.0;
+        } else {
+          external_port2_[i] = 1.0; // Not at upper limit
+        }
+
+        if (joints_[i].state.position <= lower_limit) {
+          external_port1_[i] = 0.0; // Lower limit detected
+          if (velocity_cmd < 0) velocity_cmd = 0.0;
+          if (effort_cmd < 0) effort_cmd = 0.0;
+        } else {
+          external_port1_[i] = 1.0; // Not at lower limit
+        }
       }
 
       joints_[i].state.velocity = velocity_cmd;
@@ -651,6 +657,24 @@ return_type DynamixelHardware::write(
       } else if (std::abs(effort_cmd) > 1e-6) {
         // Effort control mode: simulate velocity from effort
         double simulated_velocity = effort_cmd * 0.5; // Simple effort->velocity conversion
+
+        // Simulate stall condition - reduce velocity as position approaches limits
+        if (external_types_[i] == "dual_limit") {
+          const double upper_limit = 1.0;
+          const double lower_limit = -1.0;
+          const double stall_zone = 0.1; // Stall within 0.1 rad of limits
+
+          if (effort_cmd > 0 && joints_[i].state.position > (upper_limit - stall_zone)) {
+            // Approaching upper limit - simulate increasing resistance
+            double resistance_factor = 1.0 - (upper_limit - joints_[i].state.position) / stall_zone;
+            simulated_velocity *= (1.0 - resistance_factor);
+          } else if (effort_cmd < 0 && joints_[i].state.position < (lower_limit + stall_zone)) {
+            // Approaching lower limit - simulate increasing resistance
+            double resistance_factor = 1.0 - (joints_[i].state.position - lower_limit) / stall_zone;
+            simulated_velocity *= (1.0 - resistance_factor);
+          }
+        }
+
         joints_[i].state.velocity = simulated_velocity;
         joints_[i].state.position += simulated_velocity * dt;
       }
