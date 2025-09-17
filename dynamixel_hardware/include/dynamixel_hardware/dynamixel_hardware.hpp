@@ -95,6 +95,8 @@ private:
   CallbackReturn set_joint_velocities();
   CallbackReturn set_joint_params();
   CallbackReturn set_joint_currents();
+
+  bool reboot_joint(uint8_t joint_id, size_t joint_index);
   
   DynamixelWorkbench dynamixel_workbench_;
   std::map<const char * const, const ControlItem *> control_items_;
@@ -104,6 +106,8 @@ private:
   std::vector<double> mechanical_reductions_;
   std::vector<std::string> external_types_;
   std::vector<double> effort_to_current_scale_;
+  std::vector<bool> enable_auto_reboot_;
+  std::vector<bool> reboot_requested_;
   bool torque_enabled_{false};
   ControlMode control_mode_{ControlMode::Position};
   bool mode_changed_{false};
@@ -129,6 +133,11 @@ private:
   // Simulation_values when usb_dummy is ture
   double dummy_current_limit_A_ = 3.0;
   double dummy_current_slope_A_per_rad_s_ = 0.6;
+
+  // Error simulation
+  std::vector<int> dummy_error_countdown_;
+  std::vector<bool> dummy_error_active_;
+  std::vector<bool> dummy_motion_paused_;  // Stop motion during error state
 
   // Syncread handler
   int sr_idx_p_cur_ = -1, sr_idx_x_cur_ = -1;
