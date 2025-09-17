@@ -1205,18 +1205,77 @@ bool DynamixelHardware::reboot_joint(uint8_t joint_id, size_t joint_index)
 
   const char* log = nullptr;
 
-  // 1. torque_off
+  // 1. torque_off (try, but don't fail reboot if it fails - servo may be in error state)
   if (!dynamixel_workbench_.torqueOff(joint_id, &log)) {
-    RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware),
-                "Torque off failed for ID %d: %s", joint_id, log ? log : "unknown error");
-    return false;
+    RCLCPP_WARN(rclcpp::get_logger(kDynamixelHardware),
+                "Torque off failed for ID %d: %s (continuing with reboot)", joint_id, log ? log : "unknown error");
   }
 
-  // 2. send_reboot
-  if (!dynamixel_workbench_.reboot(joint_id, &log)) {
-    RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware),
-                "Reboot command failed for ID %d: %s", joint_id, log ? log : "unknown error");
-    return false;
+  // 2. send_reboot (try multiple approaches for stuck servos)
+  bool reboot_success = false;
+
+  // Try standard reboot first
+  if (dynamixel_workbench_.reboot(joint_id, &log)) {
+    reboot_success = true;
+  } else {
+    RCLCPP_WARN(rclcpp::get_logger(kDynamixelHardware),
+                "Standard reboot failed for ID %d: %s (trying force reboot)", joint_id, log ? log : "unknown error");
+
+    // Try multiple recovery strategies
+    RCLCPP_WARN(rclcpp::get_logger(kDynamixelHardware),
+               "Attempting emergency recovery for servo ID %d", joint_id);
+
+    // Strategy 1: Try clearing error status
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    if (dynamixel_workbench_.itemWrite(joint_id, "Hardware_Error_Status", 0, &log)) {
+      RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware),
+                 "Cleared hardware error status for ID %d, retrying reboot", joint_id);
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+      if (dynamixel_workbench_.reboot(joint_id, &log)) {
+        reboot_success = true;
+        RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware),
+                   "Recovery reboot successful for ID %d", joint_id);
+      }
+    }
+
+    // Strategy 2: Try ping to re-establish communication
+    if (!reboot_success) {
+      uint16_t model_number;
+      for (int ping_retry = 0; ping_retry < 3; ++ping_retry) {
+        if (dynamixel_workbench_.ping(joint_id, &model_number, &log)) {
+          RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware),
+                     "Re-established communication with ID %d, trying reboot", joint_id);
+          std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+          if (dynamixel_workbench_.reboot(joint_id, &log)) {
+            reboot_success = true;
+            RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware),
+                       "Post-ping reboot successful for ID %d", joint_id);
+            break;
+          }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+      }
+    }
+
+    if (!reboot_success) {
+      RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware),
+                  "All reboot attempts failed for ID %d: %s", joint_id, log ? log : "unknown error");
+      RCLCPP_WARN(rclcpp::get_logger(kDynamixelHardware),
+                 "Servo ID %d may require manual power cycle. Disabling auto-reboot for this joint.", joint_id);
+
+      // Disable auto-reboot for this joint to prevent infinite retry loops
+      enable_auto_reboot_[joint_index] = false;
+
+      // Clear flags and continue operation
+      hw_error_bits_[joint_index] = 0;
+      hw_error_code_[joint_index] = 0.0;
+      post_reboot_grace_[joint_index] = 10;  // Extended grace period
+      error_detection_suspend_[joint_index] = 50;  // Extended suspend period
+
+      return false;  // Still return false to indicate reboot failure
+    }
   }
 
   // 3. wait for reboot
