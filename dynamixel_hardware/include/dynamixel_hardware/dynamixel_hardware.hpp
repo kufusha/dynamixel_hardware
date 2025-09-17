@@ -95,6 +95,7 @@ private:
   CallbackReturn set_joint_velocities();
   CallbackReturn set_joint_params();
   CallbackReturn set_joint_currents();
+  CallbackReturn set_joint_params_for_one(size_t joint_index);
 
   bool reboot_joint(uint8_t joint_id, size_t joint_index);
   
@@ -137,7 +138,10 @@ private:
   // Error simulation
   std::vector<int> dummy_error_countdown_;
   std::vector<bool> dummy_error_active_;
-  std::vector<bool> dummy_motion_paused_;  // Stop motion during error state
+
+  // Post-reboot grace period
+  std::vector<int> post_reboot_grace_;  // Skip command cycles after reboot
+  std::vector<int> error_detection_suspend_;  // Suspend error detection after reboot
 
   // Syncread handler
   int sr_idx_p_cur_ = -1, sr_idx_x_cur_ = -1;

@@ -136,6 +136,8 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
   effort_to_current_scale_.resize(info_.joints.size(), 1.0);
   dummy_error_countdown_.resize(info_.joints.size(), 0);
   dummy_error_active_.resize(info_.joints.size(), false);
+  post_reboot_grace_.resize(info_.joints.size(), 0);
+  error_detection_suspend_.resize(info_.joints.size(), 0);
 
 
   // Create ID-sorted index mapping to ensure joints are processed in ID order
@@ -468,70 +470,57 @@ return_type DynamixelHardware::read(
       const double limit = std::isfinite(current_limits_A_[i]) ? current_limits_A_[i] : dummy_current_limit_A_;
       present_currents_A_[i] = std::min(limit, std::abs(v) * dummy_current_slope_A_per_rad_s_);
 
-      // Error simulation based on various triggers
-      // Don't clear error bits if error is active (persistent until reboot)
+      // Simplified error simulation - only generate error once, clear only by reboot
       if (!dummy_error_active_[i]) {
+        // Clear error bits if no active dummy error
         hw_error_bits_[i] = 0;
-      }
 
-      // Trigger 1: High current (overload simulation)
-      if (present_currents_A_[i] > (limit * 0.8)) {  // 80% of current limit
-        dummy_error_countdown_[i]++;
-        if (dummy_error_countdown_[i] > 50) {  // After 50 cycles (~0.5 seconds)
-          dummy_error_active_[i] = true;
-          hw_error_bits_[i] |= 0x20;  // Overload error
-          static auto last_warn_time_1 = std::chrono::steady_clock::now();
-          auto now = std::chrono::steady_clock::now();
-          if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_warn_time_1).count() > 2000) {
+        // Check for error conditions only if not already in error state
+        // Trigger 1: High current (overload simulation)
+        if (present_currents_A_[i] > (limit * 0.8)) {  // 80% of current limit
+          dummy_error_countdown_[i]++;
+          if (dummy_error_countdown_[i] > 50) {  // After 50 cycles (~0.5 seconds)
+            dummy_error_active_[i] = true;
+            hw_error_bits_[i] = 0x20;  // Overload error
             RCLCPP_WARN(rclcpp::get_logger(kDynamixelHardware),
-                       "Dummy Mode: Overload error simulated for joint %d (current: %.2fA)",
+                       "Dummy Mode: Overload error triggered for joint %d (current: %.2fA)",
                        joint_ids_[i], present_currents_A_[i]);
-            last_warn_time_1 = now;
           }
+        } else {
+          dummy_error_countdown_[i] = 0;
         }
-      } else {
-        dummy_error_countdown_[i] = 0;
-      }
 
-      // Trigger 2: Extreme position (mechanical limit simulation)
-      const double pos = joints_[i].state.position;
-      if (std::abs(pos) > 3.0) {  // Beyond ±3 radians (~172 degrees)
-        dummy_error_active_[i] = true;
-        hw_error_bits_[i] |= 0x20;  // Overload error
-        static auto last_warn_time_2 = std::chrono::steady_clock::now();
-        auto now2 = std::chrono::steady_clock::now();
-        if (std::chrono::duration_cast<std::chrono::milliseconds>(now2 - last_warn_time_2).count() > 2000) {
+        // Trigger 2: Extreme position (mechanical limit simulation)
+        const double pos = joints_[i].state.position;
+        if (std::abs(pos) > 3.0) {  // Beyond ±3 radians (~172 degrees)
+          dummy_error_active_[i] = true;
+          hw_error_bits_[i] = 0x20;  // Overload error
           RCLCPP_WARN(rclcpp::get_logger(kDynamixelHardware),
-                     "Dummy Mode: Position limit overload simulated for joint %d (pos: %.2f rad)",
+                     "Dummy Mode: Position overload triggered for joint %d (pos: %.2f rad)",
                      joint_ids_[i], pos);
-          last_warn_time_2 = now2;
         }
-      }
 
-      // Trigger 3: High velocity change (sudden shock simulation)
-      static std::vector<double> prev_velocity(joints_.size(), 0.0);
-      const double vel_change = std::abs(v - prev_velocity[i]);
-      if (vel_change > 5.0) {  // Sudden velocity change > 5 rad/s
-        dummy_error_active_[i] = true;
-        hw_error_bits_[i] |= 0x04;  // Electrical shock error
-        static auto last_warn_time_3 = std::chrono::steady_clock::now();
-        auto now3 = std::chrono::steady_clock::now();
-        if (std::chrono::duration_cast<std::chrono::milliseconds>(now3 - last_warn_time_3).count() > 2000) {
+        // Trigger 3: High velocity change (sudden shock simulation)
+        static std::vector<double> prev_velocity(joints_.size(), 0.0);
+        const double vel_change = std::abs(v - prev_velocity[i]);
+        if (vel_change > 5.0) {  // Sudden velocity change > 5 rad/s
+          dummy_error_active_[i] = true;
+          hw_error_bits_[i] = 0x04;  // Electrical shock error
           RCLCPP_WARN(rclcpp::get_logger(kDynamixelHardware),
-                     "Dummy Mode: Electrical shock error simulated for joint %d (vel change: %.2f)",
+                     "Dummy Mode: Shock error triggered for joint %d (vel change: %.2f)",
                      joint_ids_[i], vel_change);
-          last_warn_time_3 = now3;
         }
-      }
-      prev_velocity[i] = v;
-
-      // Maintain error state until explicitly cleared by reboot
-      if (dummy_error_active_[i]) {
-        // Keep the error bit set
-        if (hw_error_bits_[i] == 0) {
-          // This means reboot cleared the error
+        prev_velocity[i] = v;
+      } else {
+        // Error is active - maintain error state until cleared by reboot
+        if (hw_error_bits_[i] != 0) {
+          // Keep existing error bits
+        } else {
+          // Error bits were cleared by reboot - deactivate dummy error
           dummy_error_active_[i] = false;
           dummy_error_countdown_[i] = 0;
+          RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware),
+                     "Dummy Mode: Error cleared by reboot for joint %d", joint_ids_[i]);
         }
       }
 
@@ -542,6 +531,12 @@ return_type DynamixelHardware::read(
 
     // Auto-reboot error detection (for dummy mode)
     for (size_t k = 0; k < joints_.size(); ++k) {
+      // Skip error detection during suspend period
+      if (error_detection_suspend_[k] > 0) {
+        error_detection_suspend_[k]--;
+        continue;
+      }
+
       if (enable_auto_reboot_[k] && !reboot_requested_[k]) {
         // Critical errors that require reboot:
         // 0x04: Electrical Shock Error
@@ -708,6 +703,12 @@ dynamixel_workbench_.getSyncReadData(1, x_series_ids, 5,
 
   // Auto-reboot error detection (for real hardware mode)
   for (size_t k = 0; k < joints_.size(); ++k) {
+    // Skip error detection during suspend period
+    if (error_detection_suspend_[k] > 0) {
+      error_detection_suspend_[k]--;
+      continue;
+    }
+
     if (enable_auto_reboot_[k] && !reboot_requested_[k]) {
       // Critical errors that require reboot:
       // 0x04: Electrical Shock Error
@@ -1005,6 +1006,39 @@ CallbackReturn DynamixelHardware::set_joint_params()
   return CallbackReturn::SUCCESS;
 }
 
+CallbackReturn DynamixelHardware::set_joint_params_for_one(size_t joint_index)
+{
+  const char * log = nullptr;
+  size_t orig_idx = id_sorted_indices_[joint_index];
+
+  for (auto paramName : kExtraJointParameters) {
+    auto it = info_.joints[orig_idx].parameters.find(paramName);
+    if (it == info_.joints[orig_idx].parameters.end()) continue;
+
+    int value = 0;
+    try {
+      value = std::stoi(it->second);
+    } catch (...) {
+      RCLCPP_WARN(rclcpp::get_logger(kDynamixelHardware),
+                  "Invalid parameter %s for joint %d", paramName, joint_ids_[joint_index]);
+      continue;
+    }
+
+    if (!dynamixel_workbench_.itemWrite(joint_ids_[joint_index], paramName, value, &log)) {
+      RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware),
+                   "Reapply %s failed (ID:%d): %s",
+                   paramName, joint_ids_[joint_index], log ? log : "unknown error");
+      return CallbackReturn::ERROR;
+    }
+
+    RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware),
+               "Reapplied %s = %d for joint ID %d after reboot",
+               paramName, value, joint_ids_[joint_index]);
+  }
+
+  return CallbackReturn::SUCCESS;
+}
+
 CallbackReturn DynamixelHardware::set_joint_velocities()
 {
   static uint32_t vel_error_count = 0;
@@ -1012,6 +1046,11 @@ CallbackReturn DynamixelHardware::set_joint_velocities()
   const char * log = nullptr;
 
   for (uint i = 0; i < info_.joints.size(); i++) {
+    // Skip command during grace period after reboot
+    if (post_reboot_grace_[i] > 0) {
+      post_reboot_grace_[i]--;
+      continue;
+    }
 
     // mode_check
     if (operating_modes_[i] != 1){
@@ -1056,6 +1095,12 @@ hardware_interface::CallbackReturn DynamixelHardware::set_joint_currents()
   static const uint32_t ERROR_LOG_INTERVAL = 200;
 
   for (uint i = 0; i < info_.joints.size(); ++i) {
+    // Skip command during grace period after reboot
+    if (post_reboot_grace_[i] > 0) {
+      post_reboot_grace_[i]--;
+      continue;
+    }
+
     // Mode check
     if (operating_modes_[i] != 0) {
       continue;
@@ -1137,8 +1182,24 @@ bool DynamixelHardware::reboot_joint(uint8_t joint_id, size_t joint_index)
   if (use_dummy_) {
     RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware),
                "Dummy mode: Simulating reboot for joint ID %d", joint_id);
+
+    // Clear all error states
     hw_error_bits_[joint_index] = 0;
     hw_error_code_[joint_index] = 0.0;
+    dummy_error_active_[joint_index] = false;
+    dummy_error_countdown_[joint_index] = 0;
+
+    // Reset to safe values to prevent immediate re-error
+    joints_[joint_index].state.position = 0.0;
+    joints_[joint_index].state.velocity = 0.0;
+    present_currents_A_[joint_index] = 0.1;
+
+    // Set grace periods
+    post_reboot_grace_[joint_index] = 5;
+    error_detection_suspend_[joint_index] = 20;
+
+    RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware),
+               "Dummy mode: Reboot completed for joint ID %d (reset to safe state)", joint_id);
     return true;
   }
 
@@ -1192,12 +1253,28 @@ bool DynamixelHardware::reboot_joint(uint8_t joint_id, size_t joint_index)
     return false;
   }
 
-  // 7. clear_error
+  // 7. Re-apply RAM parameters (lost during reboot)
+  if (set_joint_params_for_one(joint_index) != CallbackReturn::SUCCESS) {
+    RCLCPP_WARN(rclcpp::get_logger(kDynamixelHardware),
+               "Failed to reapply some parameters for joint ID %d after reboot", joint_id);
+  }
+
+  // 8. Startup grace period
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  // 9. Set grace period to skip next few command cycles
+  post_reboot_grace_[joint_index] = 5;  // Skip 5 cycles (~50ms at 100Hz)
+
+  // 10. Suspend error detection for recovery period
+  error_detection_suspend_[joint_index] = 20;  // Suspend for 20 cycles (~200ms)
+
+  // 11. Clear error flags
   hw_error_bits_[joint_index] = 0;
   hw_error_code_[joint_index] = 0.0;
 
   RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware),
-             "Joint ID %d reboot completed successfully", joint_id);
+             "Joint ID %d reboot completed successfully (grace period: %d cycles)",
+             joint_id, post_reboot_grace_[joint_index]);
   return true;
 }
 
