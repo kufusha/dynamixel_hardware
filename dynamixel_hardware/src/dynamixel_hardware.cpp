@@ -944,17 +944,17 @@ return_type DynamixelHardware::write(
     // 0x20: Overload Error
     uint8_t critical_errors = 0x04 | 0x08 | 0x10 | 0x20;
 
-    // Check for both active errors AND protection periods
+    // Check for active errors and reboot requests (but not post-reboot grace periods)
     bool has_critical_error = (hw_error_bits_[i] & critical_errors) != 0;
-    bool in_protection_period = (reboot_requested_[i] || post_reboot_grace_[i] > 0 || error_detection_suspend_[i] > 0);
+    bool reboot_in_progress = reboot_requested_[i];
 
-    if (has_critical_error || in_protection_period) {
+    if (has_critical_error || reboot_in_progress) {
       static auto last_error_time = std::chrono::steady_clock::now();
       auto now = std::chrono::steady_clock::now();
       if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_error_time).count() > 1000) {
         RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware),
-                     "Joint ID %d in critical state (error=0x%02X, protection=%s) - disabling all controllers",
-                     joint_ids_[i], hw_error_bits_[i], in_protection_period ? "true" : "false");
+                     "Joint ID %d in critical state (error=0x%02X, reboot_requested=%s) - disabling all controllers",
+                     joint_ids_[i], hw_error_bits_[i], reboot_in_progress ? "true" : "false");
         last_error_time = now;
       }
 
