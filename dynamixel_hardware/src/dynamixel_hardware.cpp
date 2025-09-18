@@ -468,7 +468,36 @@ return_type DynamixelHardware::read(
     for (size_t i = 0; i < joints_.size(); ++i) {
       const double v = std::isfinite(joints_[i].state.velocity) ? joints_[i].state.velocity : 0.0;
       const double limit = std::isfinite(current_limits_A_[i]) ? current_limits_A_[i] : dummy_current_limit_A_;
-      present_currents_A_[i] = std::min(limit, std::abs(v) * dummy_current_slope_A_per_rad_s_);
+
+      // Don't update current during post-reboot grace period to prevent immediate re-error
+      if (post_reboot_grace_[i] == 0 && error_detection_suspend_[i] == 0) {
+        double new_current = std::min(limit, std::abs(v) * dummy_current_slope_A_per_rad_s_);
+        present_currents_A_[i] = new_current;
+
+        // Debug: Log when current calculation resumes
+        if (i == 0) {
+          static auto last_normal_time = std::chrono::steady_clock::now();
+          auto now = std::chrono::steady_clock::now();
+          if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_normal_time).count() > 200) {
+            RCLCPP_WARN(rclcpp::get_logger(kDynamixelHardware),
+                       "Joint 1: NORMAL MODE - Velocity=%.2f, Current=%.2fA (calculated)",
+                       v, new_current);
+            last_normal_time = now;
+          }
+        }
+      } else {
+        // Debug: Log grace/suspend status for joint 1
+        if (i == 0) {  // joint_1 = index 0
+          static auto last_debug_time = std::chrono::steady_clock::now();
+          auto now = std::chrono::steady_clock::now();
+          if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_debug_time).count() > 200) {
+            RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware),
+                       "Joint 1: Grace=%d, Suspend=%d, Velocity=%.2f, Current=%.2fA (protected)",
+                       post_reboot_grace_[i], error_detection_suspend_[i], v, present_currents_A_[i]);
+            last_debug_time = now;
+          }
+        }
+      }
 
       // Simplified error simulation - only generate error once, clear only by reboot
       if (!dummy_error_active_[i]) {
@@ -550,6 +579,18 @@ return_type DynamixelHardware::read(
                      "Joint ID %d: Critical error detected (0x%02X). Requesting reboot.",
                      joint_ids_[k], hw_error_bits_[k]);
           reboot_requested_[k] = true;
+
+          // Activate global stop mode
+          global_stop_ = true;
+
+          // Stop all joints immediately when reboot is requested
+          for (size_t j = 0; j < joints_.size(); ++j) {
+            joints_[j].command.velocity = 0.0;
+            joints_[j].command.effort = 0.0;
+            joints_[j].command.position = joints_[j].state.position;  // Hold current position
+          }
+          RCLCPP_WARN(rclcpp::get_logger(kDynamixelHardware),
+                     "Emergency stop: All joint commands cleared due to joint %d reboot request", joint_ids_[k]);
         }
       }
     }
@@ -722,6 +763,18 @@ dynamixel_workbench_.getSyncReadData(1, x_series_ids, 5,
                    "Joint ID %d: Critical error detected (0x%02X). Requesting reboot.",
                    joint_ids_[k], hw_error_bits_[k]);
         reboot_requested_[k] = true;
+
+        // Activate global stop mode
+        global_stop_ = true;
+
+        // Stop all joints immediately when reboot is requested
+        for (size_t j = 0; j < joints_.size(); ++j) {
+          joints_[j].command.velocity = 0.0;
+          joints_[j].command.effort = 0.0;
+          joints_[j].command.position = joints_[j].state.position;  // Hold current position
+        }
+        RCLCPP_WARN(rclcpp::get_logger(kDynamixelHardware),
+                   "Emergency stop: All joint commands cleared due to joint %d reboot request", joint_ids_[k]);
       }
     }
   }
@@ -734,14 +787,84 @@ return_type DynamixelHardware::write(
   const rclcpp::Time & /* time */,
   const rclcpp::Duration & period)
 {
+  // GLOBAL STOP: If ANY joint is rebooting, stop ALL joints
+  if (global_stop_) {
+    for (auto &joint : joints_) {
+      joint.command.velocity = 0.0;
+      joint.command.effort = 0.0;
+      joint.command.position = joint.state.position;  // Hold current position
+    }
+
+    // Send zero commands to hardware
+    if (!use_dummy_) {
+      set_joint_velocities();
+      set_joint_currents();
+    }
+
+    static auto last_global_stop_log = std::chrono::steady_clock::now();
+    auto now = std::chrono::steady_clock::now();
+    if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_global_stop_log).count() > 500) {
+      RCLCPP_WARN(rclcpp::get_logger(kDynamixelHardware),
+                 "Global stop: All joints stopped during reboot operation");
+      last_global_stop_log = now;
+    }
+
+    // Continue to reboot logic below
+  }
+
+  // Handle auto-reboot requests
+  for (size_t i = 0; i < joints_.size(); ++i) {
+    if (reboot_requested_[i]) {
+      RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware),
+                 "Executing reboot for joint ID %d", joint_ids_[i]);
+
+      if (!use_dummy_) {
+        // Send zero commands to hardware before reboot
+        for (size_t j = 0; j < joints_.size(); ++j) {
+          joints_[j].command.velocity = 0.0;
+          joints_[j].command.effort   = 0.0;
+        }
+        set_joint_velocities();
+        set_joint_currents();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+
+      // Execute reboot
+      if (reboot_joint(joint_ids_[i], i)) {
+        RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware),
+                   "Reboot successful for joint ID %d", joint_ids_[i]);
+      } else {
+        RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware),
+                    "Reboot failed for joint ID %d", joint_ids_[i]);
+      }
+      reboot_requested_[i] = false;
+    }
+  }
+
   if (use_dummy_) {
     const double dt = std::max(1e-6, period.seconds());
     for (size_t i = 0; i < joints_.size(); ++i) {
       joints_[i].prev_command.velocity = joints_[i].command.velocity;
       joints_[i].prev_command.effort = joints_[i].command.effort;
 
-      double velocity_cmd = joints_[i].command.velocity;
-      double effort_cmd = joints_[i].command.effort;
+      double velocity_cmd, effort_cmd;
+
+      // Skip commands during post-reboot grace period or if error is active (safety measure)
+      if (post_reboot_grace_[i] > 0 || dummy_error_active_[i] || error_detection_suspend_[i] > 0) {
+        if (post_reboot_grace_[i] > 0) {
+          post_reboot_grace_[i]--;
+        }
+        velocity_cmd = 0.0;
+        effort_cmd = 0.0;
+
+        // Also clear command interfaces during protection period to prevent accumulation
+        joints_[i].command.velocity = 0.0;
+        joints_[i].command.effort = 0.0;
+      } else {
+        // Normal operation: use actual commands
+        velocity_cmd = joints_[i].command.velocity;
+        effort_cmd = joints_[i].command.effort;
+      }
 
       // Dual limit sensor clamping (dummy mode)
       if (external_types_[i] == "dual_limit") {
@@ -800,48 +923,63 @@ return_type DynamixelHardware::write(
       }
     }
 
-    // Handle auto-reboot requests in dummy mode too
-    for (size_t i = 0; i < joints_.size(); ++i) {
-      if (reboot_requested_[i]) {
-        RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware),
-                   "Executing reboot for joint ID %d", joint_ids_[i]);
-
-        if (reboot_joint(joint_ids_[i], i)) {
-          RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware),
-                     "Reboot successful for joint ID %d", joint_ids_[i]);
-        } else {
-          RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware),
-                      "Reboot failed for joint ID %d", joint_ids_[i]);
-        }
-        reboot_requested_[i] = false;
-      }
-    }
+    // Reboot requests handled above in common section
 
     return return_type::OK;
   }
 
-  // Handle auto-reboot requests
-  for (size_t i = 0; i < joints_.size(); ++i) {
-    if (reboot_requested_[i]) {
-      RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware),
-                 "Executing reboot for joint ID %d", joint_ids_[i]);
-
-      if (reboot_joint(joint_ids_[i], i)) {
-        RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware),
-                   "Reboot successful for joint ID %d", joint_ids_[i]);
-      } else {
-        RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware),
-                    "Reboot failed for joint ID %d", joint_ids_[i]);
-      }
-      reboot_requested_[i] = false;
-    }
-  }
+  // Reboot requests handled above in common section
 
   // Velocity mode(=1)
   set_joint_velocities();
   // Current mode(=0)
   set_joint_currents();
 
+  // Critical hardware error check - disable all controllers if error detected
+  for (size_t i = 0; i < joints_.size(); ++i) {
+    // Critical errors that require immediate controller shutdown:
+    // 0x04: Electrical Shock Error
+    // 0x08: Motor Encoder Error
+    // 0x10: Overheating Error
+    // 0x20: Overload Error
+    uint8_t critical_errors = 0x04 | 0x08 | 0x10 | 0x20;
+
+    // Check for both active errors AND protection periods
+    bool has_critical_error = (hw_error_bits_[i] & critical_errors) != 0;
+    bool in_protection_period = (reboot_requested_[i] || post_reboot_grace_[i] > 0 || error_detection_suspend_[i] > 0);
+
+    if (has_critical_error || in_protection_period) {
+      static auto last_error_time = std::chrono::steady_clock::now();
+      auto now = std::chrono::steady_clock::now();
+      if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_error_time).count() > 1000) {
+        RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware),
+                     "Joint ID %d in critical state (error=0x%02X, protection=%s) - disabling all controllers",
+                     joint_ids_[i], hw_error_bits_[i], in_protection_period ? "true" : "false");
+        last_error_time = now;
+      }
+
+      // Return ERROR to disable all controllers via Controller Manager
+      // This stops MoveIt Controller, Servo Bridge, MoveIt Servo, JTC - everything
+      // Continue until ALL protection periods end
+      return return_type::ERROR;
+    }
+  }
+
+  // Check if global stop can be deactivated
+  if (global_stop_) {
+    bool still_protect = false;
+    for (size_t i = 0; i < joints_.size(); ++i) {
+      if (reboot_requested_[i] || post_reboot_grace_[i] > 0 || error_detection_suspend_[i] > 0) {
+        still_protect = true;
+        break;
+      }
+    }
+    if (!still_protect) {
+      global_stop_ = false;
+      RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware),
+                 "Global stop deactivated: All protection periods ended, normal operation resumed");
+    }
+  }
 
   return return_type::OK;
 }
@@ -1052,6 +1190,12 @@ CallbackReturn DynamixelHardware::set_joint_velocities()
       continue;
     }
 
+    // Skip command if critical hardware error detected (safety measure)
+    uint8_t critical_errors = 0x04 | 0x08 | 0x10 | 0x20;
+    if (hw_error_bits_[i] & critical_errors) {
+      continue;
+    }
+
     // mode_check
     if (operating_modes_[i] != 1){
       continue;
@@ -1098,6 +1242,12 @@ hardware_interface::CallbackReturn DynamixelHardware::set_joint_currents()
     // Skip command during grace period after reboot
     if (post_reboot_grace_[i] > 0) {
       post_reboot_grace_[i]--;
+      continue;
+    }
+
+    // Skip command if critical hardware error detected (safety measure)
+    uint8_t critical_errors = 0x04 | 0x08 | 0x10 | 0x20;
+    if (hw_error_bits_[i] & critical_errors) {
       continue;
     }
 
@@ -1179,6 +1329,11 @@ void DynamixelHardware::set_operating_modes()
 
 bool DynamixelHardware::reboot_joint(uint8_t joint_id, size_t joint_index)
 {
+  // CRITICAL: Stop ALL joints during ANY reboot to prevent continued motion
+  global_stop_ = true;
+  RCLCPP_WARN(rclcpp::get_logger(kDynamixelHardware),
+             "GLOBAL STOP ACTIVATED: All joints stopped during joint %d reboot", joint_id);
+
   if (use_dummy_) {
     RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware),
                "Dummy mode: Simulating reboot for joint ID %d", joint_id);
@@ -1192,11 +1347,22 @@ bool DynamixelHardware::reboot_joint(uint8_t joint_id, size_t joint_index)
     // Reset to safe values to prevent immediate re-error
     joints_[joint_index].state.position = 0.0;
     joints_[joint_index].state.velocity = 0.0;
+    joints_[joint_index].state.effort = 0.0;
     present_currents_A_[joint_index] = 0.1;
 
-    // Set grace periods
-    post_reboot_grace_[joint_index] = 5;
-    error_detection_suspend_[joint_index] = 20;
+    // Clear dangerous commands to prevent continued motion after reboot
+    for (size_t j = 0; j < joints_.size(); ++j) {
+      joints_[j].command.position = 0.0;
+      joints_[j].command.velocity = 0.0;
+      joints_[j].command.effort   = 0.0;
+    }
+    joints_[joint_index].prev_command.position = 0.0;
+    joints_[joint_index].prev_command.velocity = 0.0;
+    joints_[joint_index].prev_command.effort = 0.0;
+
+    // Set grace periods (longer for dummy mode stability)
+    post_reboot_grace_[joint_index] = 50;  // 50 cycles (~500ms)
+    error_detection_suspend_[joint_index] = 100;  // 100 cycles (~1000ms)
 
     RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware),
                "Dummy mode: Reboot completed for joint ID %d (reset to safe state)", joint_id);
@@ -1331,9 +1497,14 @@ bool DynamixelHardware::reboot_joint(uint8_t joint_id, size_t joint_index)
   hw_error_bits_[joint_index] = 0;
   hw_error_code_[joint_index] = 0.0;
 
-  RCLCPP_INFO(rclcpp::get_logger(kDynamixelHardware),
-             "Joint ID %d reboot completed successfully (grace period: %d cycles)",
-             joint_id, post_reboot_grace_[joint_index]);
+  // 12. Clear dangerous commands to prevent continued motion after reboot
+  for (size_t j = 0; j < joints_.size(); ++j) {
+    joints_[j].command.position = joints_[j].state.position;
+    joints_[j].command.velocity = 0.0;
+    joints_[j].command.effort   = 0.0;
+    joints_[j].prev_command     = joints_[j].command;
+  }
+  
   return true;
 }
 

@@ -143,6 +143,9 @@ private:
   std::vector<int> post_reboot_grace_;  // Skip command cycles after reboot
   std::vector<int> error_detection_suspend_;  // Suspend error detection after reboot
 
+  // Global stop flag - stops ALL joints during ANY reboot
+  bool global_stop_{false};
+
   // Syncread handler
   int sr_idx_p_cur_ = -1, sr_idx_x_cur_ = -1;
   int sr_idx_p_err_ = -1, sr_idx_x_err_ = -1;
