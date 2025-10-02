@@ -53,6 +53,7 @@ enum class ControlMode
 {
   Position,
   Velocity,
+  Effort,
 };
 
 class DynamixelHardware : public hardware_interface::SystemInterface
@@ -93,13 +94,21 @@ private:
   CallbackReturn set_joint_positions();
   CallbackReturn set_joint_velocities();
   CallbackReturn set_joint_params();
+  CallbackReturn set_joint_currents();
+  CallbackReturn set_joint_params_for_one(size_t joint_index);
+
+  bool reboot_joint(uint8_t joint_id, size_t joint_index);
   
   DynamixelWorkbench dynamixel_workbench_;
   std::map<const char * const, const ControlItem *> control_items_;
   std::vector<Joint> joints_;
   std::vector<uint8_t> joint_ids_;
+  std::vector<int> operating_modes_;
   std::vector<double> mechanical_reductions_;
   std::vector<std::string> external_types_;
+  std::vector<double> effort_to_current_scale_;
+  std::vector<bool> enable_auto_reboot_;
+  std::vector<bool> reboot_requested_;
   bool torque_enabled_{false};
   ControlMode control_mode_{ControlMode::Position};
   bool mode_changed_{false};
@@ -125,6 +134,17 @@ private:
   // Simulation_values when usb_dummy is ture
   double dummy_current_limit_A_ = 3.0;
   double dummy_current_slope_A_per_rad_s_ = 0.6;
+
+  // Error simulation
+  std::vector<int> dummy_error_countdown_;
+  std::vector<bool> dummy_error_active_;
+
+  // Post-reboot grace period
+  std::vector<int> post_reboot_grace_;  // Skip command cycles after reboot
+  std::vector<int> error_detection_suspend_;  // Suspend error detection after reboot
+
+  // Global stop flag - stops ALL joints during ANY reboot
+  bool global_stop_{false};
 
   // Syncread handler
   int sr_idx_p_cur_ = -1, sr_idx_x_cur_ = -1;
