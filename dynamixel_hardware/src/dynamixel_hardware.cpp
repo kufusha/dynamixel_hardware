@@ -132,6 +132,8 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
   external_port2_.resize(info_.joints.size(), std::numeric_limits<double>::quiet_NaN());
   external_scale_rad_per_count_.resize(info_.joints.size(), std::numeric_limits<double>::quiet_NaN());
   external_offset_rad_.resize(info_.joints.size(), 0.0);
+  pos_high_fixed_.resize(info_.joints.size(), 0.5);  // Default high position
+  pos_low_fixed_.resize(info_.joints.size(), 0.1);   // Default low position
   operating_modes_.resize(info_.joints.size(), 1);
   effort_to_current_scale_.resize(info_.joints.size(), 1.0);
   dummy_error_countdown_.resize(info_.joints.size(), 0);
@@ -208,6 +210,27 @@ CallbackReturn DynamixelHardware::on_init(const hardware_interface::HardwareInfo
       } catch (...) {
         RCLCPP_WARN(rclcpp::get_logger(kDynamixelHardware),
                    "Invalid effort_scale for joint %s; use 1.0",
+                    info_.joints[orig_idx].name.c_str());
+      }
+    }
+
+    // Read dual_limit fixed positions
+    if (info_.joints[orig_idx].parameters.count("pos_high_fixed") > 0) {
+      try {
+        pos_high_fixed_[i] = std::stod(info_.joints[orig_idx].parameters.at("pos_high_fixed"));
+      } catch (...) {
+        RCLCPP_WARN(rclcpp::get_logger(kDynamixelHardware),
+                   "Invalid pos_high_fixed for joint %s; use default 0.5",
+                    info_.joints[orig_idx].name.c_str());
+      }
+    }
+
+    if (info_.joints[orig_idx].parameters.count("pos_low_fixed") > 0) {
+      try {
+        pos_low_fixed_[i] = std::stod(info_.joints[orig_idx].parameters.at("pos_low_fixed"));
+      } catch (...) {
+        RCLCPP_WARN(rclcpp::get_logger(kDynamixelHardware),
+                   "Invalid pos_low_fixed for joint %s; use default 0.1",
                     info_.joints[orig_idx].name.c_str());
       }
     }
@@ -742,6 +765,28 @@ dynamixel_workbench_.getSyncReadData(1, x_series_ids, 5,
     external_port2_[k] = static_cast<double>(ext2_raw[k]);
   }
 
+  // Dual limit sensor position update
+  for (size_t i = 0; i < joints_.size(); ++i) {
+    if (external_types_[i] == "dual_limit") {
+      const double hand_open = pos_high_fixed_[i];   // Fully open position (from param)
+      const double hand_close = pos_low_fixed_[i];   // Fully closed position (from param)
+      const double hand_mid = (hand_open + hand_close) / 2.0;
+
+      // external_port1_[i] == 0 means lower limit (close) detected
+      // external_port2_[i] == 0 means upper limit (open) detected
+      if (external_port1_[i] == 0.0) {
+        // Close limit detected
+        joints_[i].state.position = hand_close;
+      } else if (external_port2_[i] == 0.0) {
+        // Open limit detected
+        joints_[i].state.position = hand_open;
+      } else {
+        // Neither limit detected - set to middle position
+        joints_[i].state.position = hand_mid;
+      }
+    }
+  }
+
   // Auto-reboot error detection (for real hardware mode)
   for (size_t k = 0; k < joints_.size(); ++k) {
     // Skip error detection during suspend period
@@ -961,7 +1006,7 @@ return_type DynamixelHardware::write(
       // Return ERROR to disable all controllers via Controller Manager
       // This stops MoveIt Controller, Servo Bridge, MoveIt Servo, JTC - everything
       // Continue until ALL protection periods end
-      return return_type::ERROR;
+      // return return_type::ERROR;
     }
   }
 

@@ -129,7 +129,9 @@ private:
   std::vector<double> external_port2_;
   
   std::vector<double> external_scale_rad_per_count_;
-  std::vector<double> external_offset_rad_; 
+  std::vector<double> external_offset_rad_;
+  std::vector<double> pos_high_fixed_;  // Fixed position when high limit detected (dual_limit)
+  std::vector<double> pos_low_fixed_;   // Fixed position when low limit detected (dual_limit)
 
   // Simulation_values when usb_dummy is ture
   double dummy_current_limit_A_ = 3.0;
