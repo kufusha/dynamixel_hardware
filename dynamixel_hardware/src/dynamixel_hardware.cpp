@@ -472,7 +472,10 @@ CallbackReturn DynamixelHardware::on_configure(const rclcpp_lifecycle::State & /
   // Don't write initial position commands to avoid unexpected movement
   // write(rclcpp::Time{}, rclcpp::Duration(0, 0));
 
-  enable_torque(true);
+  if (enable_torque(true) != return_type::OK) {
+    RCLCPP_ERROR(rclcpp::get_logger(kDynamixelHardware), "Failed to enable torque during activation");
+    return CallbackReturn::ERROR;
+  }
 
   return CallbackReturn::SUCCESS;
 }
