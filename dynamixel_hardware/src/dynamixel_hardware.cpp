@@ -1006,7 +1006,7 @@ return_type DynamixelHardware::write(
       // Return ERROR to disable all controllers via Controller Manager
       // This stops MoveIt Controller, Servo Bridge, MoveIt Servo, JTC - everything
       // Continue until ALL protection periods end
-      return return_type::ERROR;
+      // return return_type::ERROR;
     }
   }
 
